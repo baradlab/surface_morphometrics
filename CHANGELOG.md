@@ -4,6 +4,51 @@ All notable changes to the Surface Morphometrics toolkit are documented here.
 This project loosely follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [2.0.0b5] — beta
+
+Statistics and plotting: a cross-tomogram violin command, a unified pairwise
+significance tester, and spatially-aware comparison tools that treat the tomogram
+(not the triangle) as the unit of replication.
+
+### Added
+- `morphometrics violin config.yml --feature F` — one violin per membrane class, one
+  point per tomogram, from an area-weighted mean / median / histogram-peak (mode) of
+  the feature per surface. Classes lacking the feature are skipped. `--test {mwu,ttest}`
+  annotates significance stars and writes a `*_tests.csv` (Mann-Whitney U, Welch t, and
+  a paired summary-statistic KS, tagged with a `comparison_level` column).
+- `surface_morphometrics.spatial_stats` — spatially-aware distribution comparison.
+  Triangles are strongly autocorrelated, so a pooled two-sample test with n = n_triangles
+  is wildly anticonservative (Type-I ~0.9 under H0 in simulation). Provides:
+  - `permutation_test` — assumption-light default; an area-weighted KS D / Wasserstein
+    effect size with a p-value from permuting the condition label across tomograms.
+    Validated calibrated with full power.
+  - Effective sample size: `kish_neff`, `neff_from_neighbors`, a geodesic semivariogram
+    with a nested-fit correlation length, and `neff_from_correlation_length` = A/(2πℓ²).
+    Works for rough features (e.g. curvedness); reports non-identifiability for smooth
+    ones (e.g. IMM-distance), where the permutation test should be used instead.
+  - `cluster_t_interval` / `cluster_bootstrap` — confidence intervals that resample /
+    summarize whole tomograms (coverage ~0.86 / ~0.77 at nominal 0.90, vs ~0.20 for the
+    i.i.d. triangle bootstrap).
+- Golden-file characterization tests pinning `statistics()`'s CSV output byte-for-byte.
+
+### Changed
+- Factored the pairwise significance testing out of the violin command into a shared
+  `morphometrics_stats.pairwise_tests()`, and rewrote `statistics()` to delegate to it
+  (output verified byte-identical for existing callers).
+
+### ⚠️ Breaking changes
+- `statistics()`'s pairwise CSV renames its KS columns `KStest_Stars` / `KS` / `P_KS`
+  to `KS_summary_Stars` / `KS_summary_stat` / `P_KS_summary`, to make explicit that this
+  KS compares per-tomogram summary statistics, not pooled triangle distributions. Column
+  order is unchanged, so positional readers are unaffected.
+
+### Fixed
+- `statistics()` no longer crashes on >12 datasets (color list wrapped) or via a dead
+  `except e:` clause.
+- `morphometrics_stats.bootstrap` documented as deprecated for confidence intervals
+  (i.i.d. triangle resampling assumes independence and under-covers badly); points at the
+  `spatial_stats` cluster methods.
+
 ## [2.0.0b4] — beta
 
 Protein-patch workflow overhaul and a mesh-refinement pycurv speed fix.
@@ -163,6 +208,7 @@ how the toolkit is invoked.
 - README reorganized (Installation / Quick start / Pipeline / Analysis &
   visualization / Reference / Upgrading) with a table of contents.
 
+[2.0.0b5]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b4]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b3]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b2]: https://github.com/baradlab/surface_morphometrics/releases
