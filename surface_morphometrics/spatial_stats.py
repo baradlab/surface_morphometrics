@@ -10,9 +10,16 @@ Two defensible routes are provided.
 1. Permutation test (the assumption-light default):
   * permutation_test(...)  -- keeps a distributional effect size (area-weighted KS D or
                              Wasserstein) but gets the p-value by permuting the CONDITION
-                             label across the independent unit (the tomogram). Exact under
-                             exchangeability of tomograms; no correlation model, no
-                             stationarity, no N_eff. Validated calibrated with full power.
+                             label across an exchangeable unit. Exact under exchangeability;
+                             no correlation model, no stationarity, no N_eff. Validated
+                             calibrated with full power. The unit is the whole tomogram by
+                             default; pass `strata` (tomogram id per unit) to make the unit
+                             a connected component/organelle while keeping the p-value's
+                             replication level at the tomogram (nested).
+  * intraclass_correlation(...)  -- between-tomogram vs within-tomogram variance of a
+                             per-organelle summary; tells you whether organelles can be
+                             treated as independent samples (low ICC) or cluster by
+                             tomogram/cell (high ICC -> use the nested permutation).
 
 2. Effective sample size N_eff (for a corrected pooled KS a la ks_statistics):
   * kish_neff(areas)                     -- (Σw)²/Σw², the NO-correlation upper bound
@@ -276,30 +283,61 @@ _STATISTICS = {"ks": weighted_ks_statistic, "wasserstein": weighted_wasserstein}
 # Tomogram-level permutation test
 # ---------------------------------------------------------------------------
 
+def intraclass_correlation(values, groups):
+    """ICC(1): the fraction of variance in a per-unit summary that is BETWEEN groups.
+
+    Used to judge whether connected components (organelles) can be treated as
+    independent samples. `values` is one summary statistic per unit (organelle),
+    `groups` is that unit's grouping label (its tomogram). ICC near 0 means organelles
+    within a tomogram are no more alike than across tomograms -> they are ~independent
+    and a "flat" per-organelle analysis is justified. ICC near 1 means strong
+    tomogram/cell-level clustering -> treating organelles as independent replicates is
+    anticonservative; use tomogram-stratified (nested) inference.
+
+    One-way random-effects ICC(1,1) from an ANOVA decomposition; returns 0.0 for a
+    negative estimate (no detectable clustering) and NaN if it cannot be computed.
+    """
+    values = np.asarray(values, dtype=float)
+    groups = np.asarray(groups)
+    uniq = np.unique(groups)
+    k, N = len(uniq), len(values)
+    if k < 2 or N <= k:
+        return float("nan")
+    grand = values.mean()
+    ns = np.array([np.sum(groups == g) for g in uniq])
+    ssb = float(np.sum([n * (values[groups == g].mean() - grand) ** 2
+                        for g, n in zip(uniq, ns)]))
+    ssw = float(np.sum([((values[groups == g] - values[groups == g].mean()) ** 2).sum()
+                        for g in uniq]))
+    msb, msw = ssb / (k - 1), ssw / (N - k)
+    n0 = (N - np.sum(ns ** 2) / N) / (k - 1)
+    denom = msb + (n0 - 1) * msw
+    if denom <= 0:
+        return 0.0
+    return float(max((msb - msw) / denom, 0.0))
+
+
 def permutation_test(unit_values, unit_conditions, statistic="ks",
-                     unit_weights=None, reps=2000, seed=0):
-    """Two-condition comparison with the tomogram as the independent unit.
+                     unit_weights=None, strata=None, reps=2000, seed=0):
+    """Two-condition comparison whose p-value treats a chosen level as the unit.
 
-    Each "unit" is one tomogram/organelle: a 1D array of that surface's per-triangle
-    feature values (optionally with per-triangle area weights). The observed statistic
-    pools all units within a condition and compares the two pooled (weighted)
-    distributions. The null is built by permuting which units belong to which condition,
-    so the p-value treats the tomogram -- not the triangle -- as the unit of replication.
-    Exact under exchangeability of tomograms; needs no correlation model or N_eff.
+    Each "unit" is one surface (a whole tomogram, or one connected component/organelle
+    when splitting): a 1D array of per-triangle feature values with optional area
+    weights. The observed effect size pools all units within a condition and compares
+    the two pooled (weighted) distributions with `statistic`. The null permutes the
+    condition label across EXCHANGEABLE BLOCKS:
 
-    Parameters
-    ----------
-    unit_values : list of 1D array-likes, one per tomogram.
-    unit_conditions : list of condition labels (exactly two distinct), one per unit.
-    statistic : "ks" (area-weighted KS D) or "wasserstein".
-    unit_weights : optional list of per-triangle weight arrays matching unit_values.
-    reps : number of random label permutations.
-    seed : RNG seed.
+      * strata=None  -> each unit is its own block (FLAT). Valid when the unit itself is
+        the level at which condition is exchangeable -- e.g. organelles when there is no
+        tomogram/cell-level clustering (check `intraclass_correlation` first).
+      * strata given -> units sharing a stratum move together and the condition is
+        permuted at the STRATUM level (NESTED). Use strata = tomogram id when condition
+        is assigned per tomogram: the effect size still uses all organelles, but the
+        p-value's floor is set by the number of tomograms, not organelles. Condition
+        must be constant within a stratum.
 
-    Returns
-    -------
-    dict with: statistic, observed, p_value, condition_a/b, n_units_a/b, reps, and
-    min_possible_p (= 2 / C(nA+nB, nA), the two-sided floor set by the design).
+    Returns a dict: statistic, observed, p_value, condition_a/b, n_units_a/b,
+    n_blocks_a/b, reps, min_possible_p (= 2 / C(n_blocks, n_blocks_a)).
     """
     from math import comb
 
@@ -312,8 +350,6 @@ def permutation_test(unit_values, unit_conditions, statistic="ks",
     if len(uniq) != 2:
         raise ValueError(f"need exactly two conditions, got {uniq}")
     ca, cb = uniq
-    idx_a = [i for i, c in enumerate(conditions) if c == ca]
-    idx_b = [i for i, c in enumerate(conditions) if c == cb]
 
     vals = [np.asarray(v, dtype=float) for v in unit_values]
     if unit_weights is None:
@@ -321,31 +357,57 @@ def permutation_test(unit_values, unit_conditions, statistic="ks",
     else:
         wts = [np.asarray(w, dtype=float) for w in unit_weights]
 
-    def pooled_stat(ia, ib):
-        va = np.concatenate([vals[i] for i in ia])
-        wa = np.concatenate([wts[i] for i in ia])
-        vb = np.concatenate([vals[i] for i in ib])
-        wb = np.concatenate([wts[i] for i in ib])
-        return stat_fn(va, vb, wa, wb)
+    # Exchangeable blocks: one unit each (flat), or one per stratum (nested).
+    if strata is None:
+        blocks = [[i] for i in range(len(vals))]
+    else:
+        strata = list(strata)
+        by_stratum = {}
+        for i, s in enumerate(strata):
+            by_stratum.setdefault(s, []).append(i)
+        blocks = list(by_stratum.values())
+    block_cond = []
+    for b in blocks:
+        cs = {conditions[i] for i in b}
+        if len(cs) != 1:
+            raise ValueError("condition must be constant within a stratum/block")
+        block_cond.append(cs.pop())
 
-    observed = pooled_stat(idx_a, idx_b)
+    blocks_a = [b for b, c in zip(blocks, block_cond) if c == ca]
+    blocks_b = [b for b, c in zip(blocks, block_cond) if c == cb]
+    if not blocks_a or not blocks_b:
+        raise ValueError("each condition needs at least one block")
+    all_blocks = blocks_a + blocks_b
+    n_blocks_a = len(blocks_a)
 
-    all_idx = idx_a + idx_b
-    n_a = len(idx_a)
+    def pooled_stat(block_idx_a, block_idx_b):
+        ia = [i for b in block_idx_a for i in b]
+        ib = [i for b in block_idx_b for i in b]
+        return stat_fn(np.concatenate([vals[i] for i in ia]),
+                       np.concatenate([vals[i] for i in ib]),
+                       np.concatenate([wts[i] for i in ia]),
+                       np.concatenate([wts[i] for i in ib]))
+
+    observed = pooled_stat(blocks_a, blocks_b)
+
     rng = np.random.default_rng(seed)
     ge = 0
     for _ in range(reps):
-        perm = rng.permutation(all_idx)
-        if pooled_stat(perm[:n_a], perm[n_a:]) >= observed - 1e-12:
+        order = rng.permutation(len(all_blocks))
+        pa = [all_blocks[j] for j in order[:n_blocks_a]]
+        pb = [all_blocks[j] for j in order[n_blocks_a:]]
+        if pooled_stat(pa, pb) >= observed - 1e-12:
             ge += 1
     return {
         "statistic": statistic,
         "observed": observed,
         "p_value": (1 + ge) / (1 + reps),
         "condition_a": ca, "condition_b": cb,
-        "n_units_a": n_a, "n_units_b": len(idx_b),
+        "n_units_a": sum(1 for c in conditions if c == ca),
+        "n_units_b": sum(1 for c in conditions if c == cb),
+        "n_blocks_a": n_blocks_a, "n_blocks_b": len(blocks_b),
         "reps": reps,
-        "min_possible_p": 2.0 / comb(len(all_idx), n_a),
+        "min_possible_p": 2.0 / comb(len(all_blocks), n_blocks_a),
     }
 
 

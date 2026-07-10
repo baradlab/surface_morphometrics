@@ -122,6 +122,49 @@ def test_permutation_wasserstein_and_validation():
         ss.permutation_test(A, ["a", "a", "a"], reps=10)   # only one condition
 
 
+# --- intraclass correlation + stratified (nested) permutation ------------------
+
+def test_intraclass_correlation_high_and_low():
+    # Strong tomogram clustering: each group's units share an offset -> ICC high.
+    rng = np.random.default_rng(0)
+    offsets = [0.0, 5.0, 10.0]
+    vals, groups = [], []
+    for gi, off in enumerate(offsets):
+        for _ in range(5):
+            vals.append(off + rng.normal(0, 0.1)); groups.append(gi)
+    assert ss.intraclass_correlation(vals, groups) > 0.9
+    # No clustering: group label unrelated to value -> ICC ~ 0.
+    v = rng.normal(0, 1, 30)
+    g = np.tile([0, 1, 2], 10)
+    assert ss.intraclass_correlation(v, g) < 0.2
+
+
+def test_nested_permutation_floor_is_set_by_tomograms_not_organelles():
+    # 2 tomograms/condition, 4 organelles each -> 8 organelles/condition, but the
+    # exchangeable blocks are the 4 tomograms, so the floor is 2/C(4,2) = 1/3.
+    rng = np.random.default_rng(1)
+    units, conds, strata = [], [], []
+    for tomo in range(4):
+        cond = "a" if tomo < 2 else "b"
+        for _ in range(4):
+            units.append(rng.normal(0 if cond == "a" else 5, 1, 100))
+            conds.append(cond); strata.append(tomo)
+    nested = ss.permutation_test(units, conds, strata=strata, reps=500)
+    assert nested["n_blocks_a"] == 2 and nested["n_units_a"] == 8
+    assert nested["min_possible_p"] == pytest.approx(2 / 6)      # 2 / C(4,2)
+    # Flat treats all 16 organelles as blocks -> a far smaller floor (more "power").
+    flat = ss.permutation_test(units, conds, reps=500)
+    assert flat["min_possible_p"] < nested["min_possible_p"]
+
+
+def test_nested_permutation_requires_constant_condition_in_stratum():
+    units = [np.arange(5) for _ in range(4)]
+    conds = ["a", "b", "a", "b"]
+    bad_strata = [0, 0, 1, 1]           # stratum 0 has both a and b -> invalid
+    with pytest.raises(ValueError):
+        ss.permutation_test(units, conds, strata=bad_strata, reps=10)
+
+
 # --- cluster bootstrap ---------------------------------------------------------
 
 def test_cluster_bootstrap_brackets_estimate_and_reproducible():
