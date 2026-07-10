@@ -160,3 +160,8 @@ dmypy.json
 *.err
 distances_job.sh
 slurm_job.sh
+
+# Committed test fixtures (override the blanket *.csv ignore above). Golden files
+# pin the exact output of statistics() so a refactor can't silently change it.
+!tests/golden/
+!tests/golden/*.csv

@@ -12,6 +12,7 @@ import copy
 import glob
 import os
 import pickle
+import warnings
 
 import click
 import csv
@@ -224,8 +225,89 @@ def ks_statistics(datasets, areas, ns, condition_names, morph_names, basename, f
                 f.write(f"{basename},KS,{condition_names[i]},{morph_names[i]},{condition_names[j]},{morph_names[j]},{ks},{p},{p_en},{p_rad}\n")
                 
 
+def significance_stars(p, ns="ns", na="n/a"):
+    """Star notation for a p-value, using this project's thresholds.
+
+    **** p<0.001, *** p<0.005, ** p<0.01, * p<0.05.
+
+    `ns` is returned for a finite, non-significant p; `na` for a missing/undefined p
+    (e.g. a degenerate comparison). Both are parameterised so callers with a different
+    legacy convention can reproduce it exactly (e.g. statistics() uses ns=na=" ").
+    """
+    if p is None or not np.isfinite(p):
+        return na
+    if p < 0.001:
+        return "****"
+    if p < 0.005:
+        return "***"
+    if p < 0.01:
+        return "**"
+    if p < 0.05:
+        return "*"
+    return ns
+
+
+def pairwise_tests(datasets, labels, include_ks=True, ns="ns", na="n/a"):
+    """Pairwise significance tests between every pair of datasets.
+
+    Operates on whatever you pass as `datasets` — in this codebase that is one
+    *summary statistic per tomogram* (e.g. a weighted_histogram_peak), so the tests
+    compare classes at the **per-tomogram summary level**, treating the tomogram as
+    the independent unit.
+
+    Always computes Mann-Whitney U (rank test, no normality assumption) and Welch's
+    t-test (unequal-variance means). When `include_ks` is True, also computes a
+    two-sample Kolmogorov-Smirnov test **on those same summary values** — this is a
+    paired summary-statistic KS, NOT the pooled triangle-distribution KS with the
+    effective-n correction in `ks_statistics()`.
+
+    Degenerate comparisons (identical or near-identical groups) return NaN -> `na`
+    rather than raising, and scipy's precision-loss warning is suppressed.
+
+    Returns a list of dicts, one per pair (i<j), ordered by dataset index.
+    """
+    rows = []
+    for i in range(len(datasets)):
+        for j in range(i + 1, len(datasets)):
+            a = np.asarray(datasets[i], dtype=float)
+            b = np.asarray(datasets[j], dtype=float)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                try:
+                    u, p_u = stats.mannwhitneyu(a, b, alternative="two-sided")
+                except ValueError:
+                    u, p_u = np.nan, np.nan
+                try:
+                    t, p_t = stats.ttest_ind(a, b, equal_var=False)   # Welch
+                except (ValueError, ZeroDivisionError):
+                    t, p_t = np.nan, np.nan
+                row = {
+                    "class_a": labels[i], "class_b": labels[j],
+                    "n_a": len(a), "n_b": len(b),
+                    "mean_a": np.mean(a), "mean_b": np.mean(b),
+                    "ci95_a": st.sem(a) * 1.96, "ci95_b": st.sem(b) * 1.96,
+                    "mwu_U": u, "mwu_p": p_u, "mwu_stars": significance_stars(p_u, ns, na),
+                    "ttest_t": t, "ttest_p": p_t, "ttest_stars": significance_stars(p_t, ns, na),
+                }
+                if include_ks:
+                    try:
+                        ks, p_ks = stats.ks_2samp(a, b)
+                    except ValueError:
+                        ks, p_ks = np.nan, np.nan
+                    row.update(ks_stat=ks, ks_p=p_ks,
+                               ks_stars=significance_stars(p_ks, ns, na))
+            rows.append(row)
+    return rows
+
+
 def statistics(datasets, basename,  condition_names, morph_names, test_type="median", filename="test.csv", figsize=(5,4), ylabel="Peak Value", custom_colors=None, separator_after=None):
     """Generate mann-whitney U test and violin plots for a set of datasets.
+
+    The pairwise CSV's KS columns (KS_summary_Stars / KS_summary_stat / P_KS_summary)
+    compare the per-tomogram SUMMARY statistics you pass in — not pooled triangle
+    distributions. For the distribution-level KS with the effective-n correction
+    (pmito / prad), use ks_statistics().
+
     Args:
         datasets (list): list of datasets to compare
         basename (str): base name of the output files
@@ -245,46 +327,28 @@ def statistics(datasets, basename,  condition_names, morph_names, test_type="med
         raw_file.write(basename+f" - {test_type}\n")
         for index, val in enumerate(datasets):
             raw_file.write(f"{condition_names[index]} {morph_names[index]},"+",".join(map(str, val))+"\n")
+    # Pairwise tests come from the shared helper; ns=na=" " reproduces this function's
+    # legacy blank token. The KS here is the paired summary-statistic KS (see
+    # KS_summary_* below and pairwise_tests' docstring), not the distribution-level
+    # test in ks_statistics().
+    results = {(r["class_a"], r["class_b"]): r
+               for r in pairwise_tests(datasets, list(range(len(datasets))),
+                                       include_ks=True, ns=" ", na=" ")}
     with open(filename, 'w') as file:
-        file.write(f"Base Experiment,Stat Type,Utest_Stars,KStest_Stars,Sample A Condition,Sample A Morph,Sample A Mean,Sample A 95% Error, Sample B Condition,Sample B Morph,Sample B Mean,Sample B 95% Error,U,P_U,T,P_T,KS,P_KS,n_A,n_B\n")
+        file.write("Base Experiment,Stat Type,Utest_Stars,KS_summary_Stars,Sample A Condition,Sample A Morph,Sample A Mean,Sample A 95% Error,Sample B Condition,Sample B Morph,Sample B Mean,Sample B 95% Error,U,P_U,T,P_T,KS_summary_stat,P_KS_summary,n_A,n_B\n")
         for i, set_a in enumerate(datasets):
             for j, set_b in enumerate(datasets):
-                if j<=i: 
+                if j<=i:
                     continue
-                try:
-                    stat_stars = " "
-                    u,p_u = stats.mannwhitneyu(set_a, set_b)
-                    if p_u < 0.001:
-                        stat_stars = "****"
-                    elif p_u < 0.005:
-                        stat_stars = "***"
-                    elif p_u < 0.01:
-                        stat_stars = "**"
-                    elif p_u < 0.05:
-                        stat_stars = "*"
-                    t,p_t = stats.ttest_ind(set_a, set_b, equal_var=False) 
-                    ks, p_ks = stats.ks_2samp(set_a, set_b)
-                    stars_ks = " "
-                    if p_ks < 0.001:
-                        stars_ks = "****"
-                    elif p_ks < 0.005:
-                        stars_ks = "***"
-                    elif p_ks < 0.01:
-                        stars_ks = "**"
-                    elif p_ks < 0.05:
-                        stars_ks = "*"
-                except e:
-                    print(e)
-                    u,p_u,t,p_t = -1,-1,-1,-1
-                # print(p_u, p_t)
-                file.write(f"{basename},{test_type},{stat_stars},{stars_ks},{condition_names[i]},{morph_names[i]},{np.mean(set_a)},{st.sem(set_a)*1.96},{condition_names[j]},{morph_names[j]},{np.mean(set_b)},{st.sem(set_b)*1.96},{u},{p_u},{t},{p_t},{ks},{p_ks},{len(set_a)},{len(set_b)}\n")
+                r = results[(i, j)]
+                file.write(f"{basename},{test_type},{r['mwu_stars']},{r['ks_stars']},{condition_names[i]},{morph_names[i]},{r['mean_a']},{r['ci95_a']},{condition_names[j]},{morph_names[j]},{r['mean_b']},{r['ci95_b']},{r['mwu_U']},{r['mwu_p']},{r['ttest_t']},{r['ttest_p']},{r['ks_stat']},{r['ks_p']},{r['n_a']},{r['n_b']}\n")
     figure_filename = filename[:-3]+"svg"
     fig,ax=plt.subplots(figsize=figsize)
     ax.set_title(basename)
     parts = ax.violinplot(datasets, showmeans=True)
     for i, pc in enumerate(parts['bodies']):
-        pc.set_facecolor(list(_colors[i][:3]) + [0.4])
-        pc.set_edgecolor(_colors[i])
+        pc.set_facecolor(list(_colors[i % len(_colors)][:3]) + [0.4])
+        pc.set_edgecolor(_colors[i % len(_colors)])
     if separator_after is not None:
         ax.axvline(x=separator_after + 0.5, color='lightgrey', linestyle='--', linewidth=1.5, zorder=0)
     ax.set_xticks(range(1,len(datasets)+1))
@@ -293,6 +357,82 @@ def statistics(datasets, basename,  condition_names, morph_names, test_type="med
     plt.tight_layout()
     fig.savefig(figure_filename)
     fig.savefig(figure_filename[:-3]+"png")
+
+
+def violin(datasets, labels, title, ylabel, filename="violin.svg", figsize=(5, 4),
+           custom_colors=None, show_points=True, annotations=None, separator_after=None):
+    """Violin plot of one distribution per label, with the observations overlaid.
+
+    Used to compare a per-surface summary statistic (one value per tomogram) across
+    membrane classes: one violin per class, one dot per tomogram.
+
+    Args:
+        datasets (list): list of 1D array-likes, one per label.
+        labels (list): x tick label for each dataset.
+        title (str): plot title.
+        ylabel (str): y axis label.
+        filename (str): output .svg path; a matching .png is written alongside.
+        figsize (tuple): figure size in inches.
+        custom_colors (list): optional per-violin colors. Defaults to module colors.
+        show_points (bool): overlay the individual observations (one dot each).
+        annotations (list): optional [(i, j, text), ...] significance brackets drawn
+            above the violins, connecting dataset i to dataset j (0-based) and
+            labelled with `text` (e.g. "**" or "ns"). Narrow comparisons are drawn
+            lowest so wider brackets stack above them.
+        separator_after (int): if set, draw a light grey dashed vertical line after
+            this violin index (1-based), e.g. separator_after=2 draws a line between
+            violins 2 and 3.
+    """
+    _colors = custom_colors if custom_colors is not None else colors
+    fig, ax = plt.subplots(figsize=figsize)
+    parts = ax.violinplot(datasets, showmeans=True, showextrema=True)
+    for i, pc in enumerate(parts['bodies']):
+        color = _colors[i % len(_colors)]
+        pc.set_facecolor(list(color[:3]) + [0.4])
+        pc.set_edgecolor(color)
+    for key in ('cmeans', 'cmaxes', 'cmins', 'cbars'):
+        if key in parts:
+            parts[key].set_color('dimgrey')
+    if show_points:
+        # Deterministic jitter so repeated runs give identical figures.
+        rng = np.random.default_rng(0)
+        for i, data in enumerate(datasets):
+            data = np.asarray(data, dtype=float)
+            x = np.full(len(data), i + 1, dtype=float)
+            if len(data) > 1:
+                x += rng.uniform(-0.06, 0.06, size=len(data))
+            ax.plot(x, data, 'o', markersize=3, alpha=0.8, zorder=3,
+                    color=list(_colors[i % len(_colors)][:3]))
+    if annotations:
+        arrays = [np.asarray(d, dtype=float) for d in datasets if len(d)]
+        data_max = max(a.max() for a in arrays)
+        data_min = min(a.min() for a in arrays)
+        span = (data_max - data_min) or abs(data_max) or 1.0
+        tick = span * 0.02
+        # Narrow comparisons first, so wider brackets nest above them.
+        ordered = sorted(annotations, key=lambda ann: abs(ann[1] - ann[0]))
+        top = data_max
+        for level, (i, j, text) in enumerate(ordered):
+            y = data_max + span * 0.09 * (level + 1)
+            x1, x2 = i + 1, j + 1
+            ax.plot([x1, x1, x2, x2], [y, y + tick, y + tick, y],
+                    lw=1.0, color='dimgrey', zorder=4)
+            ax.text((x1 + x2) / 2, y + tick, text, ha='center', va='bottom',
+                    fontsize=9, color='dimgrey')
+            top = y + tick
+        ax.set_ylim(top=top + span * 0.09)
+    if separator_after is not None:
+        ax.axvline(x=separator_after + 0.5, color='lightgrey', linestyle='--',
+                   linewidth=1.5, zorder=0)
+    ax.set_xticks(range(1, len(datasets) + 1))
+    ax.set_xticklabels(labels)
+    ax.set_ylabel(ylabel)
+    ax.set_title("\n".join(wrap(title, 45)))
+    plt.tight_layout()
+    fig.savefig(filename)
+    fig.savefig(filename[:-3] + "png")
+    plt.close(fig)
+    return filename
 
 
 def histogram(data, areas, labels, title, xlabel, filename="hist.svg", bins=50, range=None, figsize=(6,4), logx=False, vlines = True, legend=True, color_offset=0, custom_colors=None, custom_colors_light=None):
