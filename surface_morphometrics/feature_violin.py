@@ -34,18 +34,22 @@ from .config_utils import load_config
 from .morphometrics_stats import (pairwise_tests, violin, weighted_avg_and_std,
                                   weighted_median, weighted_histogram_peak)
 
-STATISTICS = ("mean", "median", "peak")
+STATISTICS = ("mean", "median", "peak", "std")
 TESTS = ("mwu", "ttest")
 
 
 def summary_statistic(values, areas, statistic, bins=100, bin_range=None):
     """Area-weighted summary of one surface's feature values.
 
-    `mean` and `median` are area-weighted; `peak` is the area-weighted histogram
-    peak (an estimate of the mode), which needs `bins` and `bin_range`.
+    `mean`, `median`, and `peak` (histogram peak, i.e. the mode) summarize the surface's
+    central tendency; `peak` needs `bins` and `bin_range`. `std` is the area-weighted
+    standard deviation -- a measure of within-surface spread / heterogeneity rather than
+    location (e.g. how variable the curvature or thickness is across one organelle).
     """
     if statistic == "mean":
         return float(weighted_avg_and_std(values, areas)[0])
+    if statistic == "std":
+        return float(weighted_avg_and_std(values, areas)[1])
     if statistic == "median":
         return float(weighted_median(values, areas))
     if statistic == "peak":
@@ -108,8 +112,8 @@ def collect_feature(config, feature, split_components=False,
               help="Feature column to compare across classes (e.g. IMM_dist).")
 @click.option("-s", "--statistic", type=click.Choice(STATISTICS), default="median",
               show_default=True,
-              help="Per-tomogram area-weighted summary: mean, median, or peak "
-                   "(histogram peak, i.e. the mode).")
+              help="Per-tomogram area-weighted summary: mean, median, peak (histogram "
+                   "peak, i.e. the mode), or std (within-surface spread / heterogeneity).")
 @click.option("--bins", type=int, default=100, show_default=True,
               help="Histogram bins, used only by --statistic peak.")
 @click.option("--range", "bin_range", type=(float, float), default=None,
@@ -139,8 +143,9 @@ def violin_cli(configfile, feature, statistic, bins, bin_range, test, split_comp
     CONFIGFILE: path to config.yml.
 
     Each class (from segmentation_values) gets a violin built from one value per
-    tomogram: the area-weighted mean, median, or histogram peak of the feature over
-    that tomogram's surface for that class.
+    tomogram: the area-weighted mean, median, histogram peak (mode), or standard
+    deviation of the feature over that tomogram's surface for that class. `std`
+    compares within-surface spread (heterogeneity) rather than central tendency.
 
     With --test, every pair of classes is compared (Mann-Whitney U, Welch t-test, and
     a Kolmogorov-Smirnov test) and the plot is annotated with significance stars from
@@ -192,7 +197,8 @@ def violin_cli(configfile, feature, statistic, bins, bin_range, test, split_comp
     unit_name_str = "organelle(s)" if split_components else "tomogram(s)"
     stat_name = {"mean": "area-weighted mean",
                  "median": "area-weighted median",
-                 "peak": "histogram peak (mode)"}[statistic]
+                 "peak": "histogram peak (mode)",
+                 "std": "area-weighted std (spread)"}[statistic]
     print(f"Violin plot of '{feature}' across {len(used)} class(es), statistic: {stat_name}")
     if statistic == "peak":
         print(f"  Histogram: {bins} bins over range {bin_range[0]:.3f} - {bin_range[1]:.3f}")

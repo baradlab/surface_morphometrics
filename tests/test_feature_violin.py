@@ -28,6 +28,17 @@ def test_summary_statistic_is_area_weighted():
     assert fv.summary_statistic(values, areas, "median") == 0.0
 
 
+def test_summary_statistic_std_is_area_weighted():
+    # weighted std: mean = 1.0, var = 0.9*(0-1)^2 + 0.1*(10-1)^2 = 0.9 + 8.1 = 9.0
+    values = np.array([0.0, 10.0])
+    areas = np.array([9.0, 1.0])
+    assert fv.summary_statistic(values, areas, "std") == pytest.approx(3.0)
+    # zero spread when all values equal, regardless of weights
+    assert fv.summary_statistic(np.array([5.0, 5.0, 5.0]), np.array([1.0, 2.0, 3.0]),
+                                "std") == pytest.approx(0.0)
+    assert "std" in fv.STATISTICS
+
+
 def _write_dataset(tmp_path, feature="IMM_dist"):
     seg, work = tmp_path / "seg", tmp_path / "work"
     seg.mkdir(); work.mkdir()
