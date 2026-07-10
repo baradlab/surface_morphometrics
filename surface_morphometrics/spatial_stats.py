@@ -27,6 +27,14 @@ Two defensible routes are provided.
   underestimating ℓ (overestimating N_eff) is anticonservative (ℓ 20% low -> Type-I
   doubles). Prefer a conservative (upper) ℓ, or just use permutation_test.
 
+For confidence intervals on a per-condition summary statistic (tomogram = unit):
+  * cluster_t_interval(...)  -- RECOMMENDED for a mean: one summary per tomogram, then a
+                             t-interval on those. Best-calibrated at small n.
+  * cluster_bootstrap(...)   -- resamples WHOLE tomograms with replacement (for non-mean
+                             statistics); under-covers somewhat at small n. Both beat the
+                             legacy i.i.d. triangle bootstrap, which assumes independence
+                             (coverage ~0.20 at nominal 0.90 -> CIs far too narrow).
+
 Distances are GEODESIC (along the surface), because two membrane sheets can be nm apart
 in 3D yet far apart on the surface.
 """
@@ -338,4 +346,126 @@ def permutation_test(unit_values, unit_conditions, statistic="ks",
         "n_units_a": n_a, "n_units_b": len(idx_b),
         "reps": reps,
         "min_possible_p": 2.0 / comb(len(all_idx), n_a),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cluster (whole-tomogram) bootstrap
+# ---------------------------------------------------------------------------
+
+def _weighted_mean(values, weights):
+    return float(np.sum(weights * values) / np.sum(weights))
+
+
+def _weighted_median(values, weights):
+    order = np.argsort(values)
+    v, w = values[order], weights[order]
+    c = np.cumsum(w)
+    return float(v[np.searchsorted(c, 0.5 * c[-1])])
+
+
+_SUMMARIES = {"mean": _weighted_mean, "median": _weighted_median}
+
+
+def cluster_bootstrap(unit_values, unit_weights=None, statistic="mean",
+                      reps=1000, ci=0.90, seed=0):
+    """Whole-tomogram bootstrap confidence interval for a pooled summary statistic.
+
+    Resamples the independent units (tomograms) WITH REPLACEMENT and recomputes the
+    area-weighted summary of the pooled triangles. This respects within-tomogram
+    spatial correlation -- unlike an i.i.d. triangle resample (the legacy
+    morphometrics_stats.bootstrap), which assumes independence and produces confidence
+    intervals that are far too narrow.
+
+    Parameters
+    ----------
+    unit_values : list of 1D array-likes, one per tomogram.
+    unit_weights : optional list of per-triangle area weights matching unit_values.
+    statistic : "mean", "median", or a callable (values, weights) -> float
+        (e.g. pass morphometrics_stats.weighted_histogram_peak with functools.partial).
+    reps : bootstrap resamples.
+    ci : central interval mass (0.90 -> 5th/95th percentiles).
+    seed : RNG seed.
+
+    Returns
+    -------
+    dict: estimate, ci_low, ci_high, ci, reps, n_units.
+    """
+    if callable(statistic):
+        stat_fn = statistic
+    elif statistic in _SUMMARIES:
+        stat_fn = _SUMMARIES[statistic]
+    else:
+        raise ValueError(f"statistic must be callable or one of {tuple(_SUMMARIES)}")
+
+    vals = [np.asarray(v, dtype=float) for v in unit_values]
+    if unit_weights is None:
+        wts = [np.ones(len(v)) for v in vals]
+    else:
+        wts = [np.asarray(w, dtype=float) for w in unit_weights]
+    n = len(vals)
+    if n < 2:
+        raise ValueError("cluster bootstrap needs at least 2 units")
+
+    def pooled(idx):
+        return stat_fn(np.concatenate([vals[i] for i in idx]),
+                       np.concatenate([wts[i] for i in idx]))
+
+    estimate = pooled(range(n))
+    rng = np.random.default_rng(seed)
+    boot = np.array([pooled(rng.integers(0, n, n)) for _ in range(reps)])
+    lo, hi = (1 - ci) / 2 * 100, (1 + ci) / 2 * 100
+    return {
+        "estimate": estimate,
+        "ci_low": float(np.percentile(boot, lo)),
+        "ci_high": float(np.percentile(boot, hi)),
+        "ci": ci, "reps": reps, "n_units": n,
+    }
+
+
+def cluster_t_interval(unit_values, unit_weights=None, statistic="mean", ci=0.90):
+    """Cluster-level t confidence interval -- the recommended CI for a per-condition mean.
+
+    Each tomogram contributes ONE number (its area-weighted `statistic`); the interval
+    is mean +/- t_{n-1} * SE over those per-tomogram values. This treats the tomogram as
+    the unit of replication and, at the small tomogram counts typical here (n~6), is
+    much better calibrated than the percentile `cluster_bootstrap` (in coverage sims the
+    t-interval reaches ~0.86 at nominal 0.90, the percentile bootstrap ~0.77, and the
+    legacy i.i.d. triangle bootstrap ~0.20). Tomograms are weighted EQUALLY (the standard
+    biological-replicate analysis), so one large surface cannot dominate.
+
+    `statistic` is "mean", "median", or a callable (values, weights) -> float. Use the
+    percentile `cluster_bootstrap` only for statistics where a per-unit summary + t is
+    not appropriate, and treat its small-n coverage as approximate.
+
+    Returns dict: estimate, ci_low, ci_high, ci, n_units, unit_values (the per-tomogram
+    summaries).
+    """
+    from scipy.stats import t as t_dist
+
+    if callable(statistic):
+        stat_fn = statistic
+    elif statistic in _SUMMARIES:
+        stat_fn = _SUMMARIES[statistic]
+    else:
+        raise ValueError(f"statistic must be callable or one of {tuple(_SUMMARIES)}")
+
+    vals = [np.asarray(v, dtype=float) for v in unit_values]
+    if unit_weights is None:
+        wts = [np.ones(len(v)) for v in vals]
+    else:
+        wts = [np.asarray(w, dtype=float) for w in unit_weights]
+    n = len(vals)
+    if n < 2:
+        raise ValueError("cluster t-interval needs at least 2 units")
+
+    per_unit = np.array([stat_fn(v, w) for v, w in zip(vals, wts)])
+    est = float(per_unit.mean())
+    se = float(per_unit.std(ddof=1) / np.sqrt(n))
+    half = t_dist.ppf((1 + ci) / 2, n - 1) * se
+    return {
+        "estimate": est,
+        "ci_low": est - half, "ci_high": est + half,
+        "ci": ci, "n_units": n,
+        "unit_values": [float(x) for x in per_unit],
     }

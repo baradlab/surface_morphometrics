@@ -120,3 +120,62 @@ def test_permutation_wasserstein_and_validation():
     assert res["observed"] > 1.0
     with pytest.raises(ValueError):
         ss.permutation_test(A, ["a", "a", "a"], reps=10)   # only one condition
+
+
+# --- cluster bootstrap ---------------------------------------------------------
+
+def test_cluster_bootstrap_brackets_estimate_and_reproducible():
+    rng = np.random.default_rng(0)
+    units = [rng.normal(5.0, 1.0, 200) for _ in range(6)]
+    r1 = ss.cluster_bootstrap(units, statistic="mean", reps=500, seed=1)
+    r2 = ss.cluster_bootstrap(units, statistic="mean", reps=500, seed=1)
+    assert r1["ci_low"] < r1["estimate"] < r1["ci_high"]
+    assert r1["estimate"] == pytest.approx(5.0, abs=0.3)
+    assert (r1["ci_low"], r1["ci_high"]) == (r2["ci_low"], r2["ci_high"])   # seeded
+    assert r1["n_units"] == 6
+
+
+def test_cluster_bootstrap_wider_than_iid_triangle_bootstrap():
+    # Correlated units: each tomogram has its own offset, so whole-tomogram resampling
+    # sees more variability than resampling individual (within-tomogram-similar) triangles.
+    rng = np.random.default_rng(2)
+    offsets = rng.normal(0, 1.0, 8)
+    units = [off + rng.normal(0, 0.05, 300) for off in offsets]   # tight within, spread between
+    weights = [np.ones(len(u)) for u in units]
+    cluster = ss.cluster_bootstrap(units, weights, statistic="mean", reps=600, seed=3)
+    cluster_w = cluster["ci_high"] - cluster["ci_low"]
+    # naive i.i.d. triangle bootstrap of the pooled values
+    pooled = np.concatenate(units)
+    rng2 = np.random.default_rng(3)
+    iid = np.array([pooled[rng2.integers(0, len(pooled), len(pooled))].mean() for _ in range(600)])
+    iid_w = np.percentile(iid, 95) - np.percentile(iid, 5)
+    assert cluster_w > 3 * iid_w      # cluster CI is much wider (honest); iid under-covers
+
+
+def test_cluster_bootstrap_callable_and_median():
+    rng = np.random.default_rng(4)
+    units = [rng.normal(2.0, 1.0, 100) for _ in range(5)]
+    med = ss.cluster_bootstrap(units, statistic="median", reps=300, seed=0)
+    assert med["ci_low"] < med["estimate"] < med["ci_high"]
+    # callable: 95th percentile as the summary
+    q = ss.cluster_bootstrap(units, statistic=lambda v, w: float(np.percentile(v, 95)),
+                             reps=200, seed=0)
+    assert q["estimate"] > med["estimate"]
+    with pytest.raises(ValueError):
+        ss.cluster_bootstrap([np.arange(5)], statistic="mean")   # need >= 2 units
+
+
+def test_cluster_t_interval_mechanics():
+    # Per-unit means are exactly known -> check the t-interval arithmetic.
+    units = [np.full(10, m) for m in (1.0, 2.0, 3.0, 4.0, 5.0)]   # unit means 1..5
+    res = ss.cluster_t_interval(units, statistic="mean", ci=0.90)
+    from scipy.stats import t as t_dist
+    m = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    se = m.std(ddof=1) / np.sqrt(5)
+    half = t_dist.ppf(0.95, 4) * se
+    assert res["estimate"] == pytest.approx(3.0)
+    assert res["ci_low"] == pytest.approx(3.0 - half)
+    assert res["ci_high"] == pytest.approx(3.0 + half)
+    assert res["unit_values"] == [1.0, 2.0, 3.0, 4.0, 5.0]
+    with pytest.raises(ValueError):
+        ss.cluster_t_interval([np.arange(3)])                    # need >= 2 units

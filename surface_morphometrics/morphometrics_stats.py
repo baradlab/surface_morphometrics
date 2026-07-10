@@ -706,6 +706,12 @@ def double_barchart(bars1, bars2, errors1, errors2, labels, title, ylabel, legen
 def bootstrap(sets, areas, conditions, morphologies, reps=1000, basename="bootstrap", filename="bootstrap.csv", bins=50, binrange=(0,100)):
     """Calculate the bootstrap statistics of a set of datasets.
 
+    DEPRECATED for confidence intervals: this resamples individual triangles i.i.d.,
+    which assumes they are independent. Triangles on a membrane are strongly spatially
+    correlated, so the resulting intervals are far too narrow (coverage ~20% at nominal
+    90% in simulation). Use surface_morphometrics.spatial_stats.cluster_t_interval
+    (per-tomogram means -> t-interval; recommended) or cluster_bootstrap (whole-tomogram
+    resample), which treat the tomogram as the unit of replication.
     """
     bootstrap_sets = []
     with open(filename, "w") as f:
