@@ -241,3 +241,108 @@
 ### `bilayer_resolution`
 - **Description:**  
   A per-triangle reliability flag in the range [0, 1] for the reported `Thickness`: how clearly the two bilayer leaflets are resolved in the local density profile. A value near 1 means two cleanly separated leaflets; values toward 0 mean the leaflets are merged into a single peak and the thickness was recovered with help from the whole-surface average fit (and tends to read slightly thin). A practical cutoff is 0.5 — values ≥ 0.5 are high-confidence measurements and values below 0.5 are lower-confidence. NaN where no thickness was measured.
+
+---
+
+## Protein-patch and connected-component labels (surface columns)
+
+These per-triangle columns are added **in place** to the membrane `.gt`/`.vtp`/`.csv` by the
+patch and component tools (`morphometrics generate_patches`, `morphometrics label_components`).
+`0` means "not in any patch/component". For the patch columns, `<prefix>` is the configured
+`patch_analysis.measurement_prefix` (default `ribo`), so several patch types (e.g. `ribo`,
+`atp`) can coexist on one surface without colliding.
+
+### `component_number`
+- **Type:** Integer
+- **Description:**
+  The connected-component label each triangle belongs to, from `morphometrics label_components`. Each connected component is usually one organelle within the tomogram. Parallels `<prefix>_patch_number`, so the same per-region aggregation (`patch_statistics`) works on it. `0` marks triangles in components dropped as too small (`patch_analysis.min_component_size`).
+
+---
+
+### `<prefix>_patch_number`
+- **Type:** Integer
+- **Description:**
+  The patch id of each triangle, equal to the **STAR line ID** of the protein particle that patch is centered on (so a patch maps directly back to its particle). A triangle inside more than one patch is assigned to the nearest center. `0` = the triangle is in no patch.
+
+---
+
+### `<prefix>_patch_center`
+- **Type:** Integer
+- **Description:**
+  The patch id, but written **only on the single central triangle** of each patch (the triangle nearest the protein), and `0` everywhere else. Lets you recover each patch's center without a distance search.
+
+---
+
+### `<prefix>_patch_center_distance`
+- **Type:** Float
+- **Description:**
+  The distance from a patch triangle to its patch's central triangle, in the surface's distance units. `NaN` outside any patch.
+
+---
+
+### `<prefix>_protein_distance`
+- **Type:** Float
+- **Description:**
+  The distance from a patch triangle to the protein particle its patch is centered on (the particle's refined coordinate). `NaN` outside any patch. Because the central triangle is the nearest triangle to the protein, the minimum of this column over a patch equals that patch's closest membrane-to-protein distance (reported per-patch as `min_protein_distance`).
+
+---
+
+### `<prefix>_random_patch_number`, `<prefix>_random_patch_center`, `<prefix>_random_patch_center_distance`
+- **Type:** Integer / Integer / Float
+- **Description:**
+  The same three quantities for the **matched random control patches** — patches of the same radius placed at random centers (subject to a minimum spacing), reusing the paired real-patch ids so random patch *i* pairs with real patch *i*. There is no `random_protein_distance`, since random patches are not centered on a protein.
+
+> **Note on headgroup distance:** unlike the columns above, the headgroup distance is a
+> per-patch / per-particle quantity measured at the patch's central triangle, not a
+> per-triangle surface column. It appears in the annotated STAR and in
+> `patch_statistics.csv` (below).
+
+---
+
+## Annotated STAR columns (per particle)
+
+Written by `morphometrics generate_patches` to `<star>_<label>_meshannotated.star` — **one
+row per particle** (not per triangle), so protein-side filtering (e.g. selecting
+cotranslating ribosomes) can be done in the STAR.
+
+### `patch_id`
+- **Type:** Integer
+- **Description:** The 1-based row number of the particle in the original STAR file (stable even when a combined STAR is filtered to one tomogram). Matches `<prefix>_patch_number` on the surface.
+
+### `mesh_distance`
+- **Type:** Float
+- **Description:** The distance from the particle to the nearest membrane triangle center (the particle's distance to the membrane midplane).
+
+### `mesh_neighbor_id`
+- **Type:** Integer
+- **Description:** The index of that nearest membrane triangle.
+
+### `<prefix>_headgroup_distance`
+- **Type:** Float
+- **Description:**
+  Added only when per-triangle `thickness` is present. The distance from the particle to the **true membrane edge (lipid headgroups)** rather than the bilayer midplane: `mesh_distance − effective_thickness/2`, evaluated at the particle's nearest (patch-center) triangle. The effective thickness is that triangle's own thickness, or — if it is unmeasured — the patch's distance-from-center weighted mean thickness, or `NaN` if the patch has no measured thickness. Can be negative if the protein sits past the headgroup plane.
+
+---
+
+## Per-region statistics columns (`patch_statistics.csv`)
+
+Written by `morphometrics patch_statistics` — **one row per region** (a real patch, a random
+control patch, or a connected component), aggregated from the per-triangle surface columns.
+
+### `source`, `region_type`, `region_id`
+- **Description:** The surface the region came from; the region kind (`<prefix>_patch`, `<prefix>_random_patch`, or `component` — the measurement prefix is preserved so multiple patch types stay distinct); and the region's integer id.
+
+### `n_triangles`, `total_area`
+- **Description:** The number of triangles in the region and their summed area.
+
+### `<property>_mean`, `<property>_median`
+- **Description:** The **area-weighted** mean and median of each requested per-triangle property (`patch_analysis.statistics_properties`, e.g. `curvedness_VV`, `thickness`) over the region. Zero/NaN values are dropped per property unless `--keep-zeros` is set.
+
+### `min_protein_distance`
+- **Type:** Float
+- **Description:** For real patches: the closest approach of the membrane **midplane** to that patch's protein (the minimum of `<prefix>_protein_distance` over the patch, which occurs at the central triangle). `NaN` for random patches and components.
+
+### `headgroup_distance`
+- **Type:** Float
+- **Description:**
+  For real patches, when `thickness` is present: the distance from the protein to the **true membrane edge (headgroups)**, measured at the patch's central triangle — `min_protein_distance − effective_thickness/2`, with the same center → patch-weighted-mean → `NaN` thickness fallback as the STAR column. Computed at the central triangle (rather than min-over-per-triangle-values) so it is always ≤ `min_protein_distance`.

@@ -9,7 +9,9 @@ distance using pycurv's vector-voting framework, and convert these morphological
 
 Everything is driven by a single `morphometrics` command plus a `config.yml` file.
 
-📖 **[Complete Quantifications Documentation](quantifications_documentation.md)** — reference guide for all morphological measurements and their interpretations.
+📖 **[Complete Quantifications Documentation](docs/quantifications.md)** — reference guide for all morphological measurements and their interpretations.
+
+📊 **[Statistics & Visualization](docs/statistics.md)** — how the distribution-comparison tools are organized and why (unit of replication, permutation tests, effective-N, plots).
 
 ## Contents
 - [Installation](#installation)
@@ -231,7 +233,7 @@ morphometrics export_obj config.yml --feature thickness --cmap magma            
 The toolkit is the `surface_morphometrics` Python package; the pipeline steps are `morphometrics` subcommands, but the underlying modules can also be imported or run with `python -m surface_morphometrics.<module>`:
 - **Mesh generation** (`make_meshes`): `mrc2xyz` (segmentation → point cloud), `xyz2ply` (screened-Poisson reconstruction + masking), `ply2vtp` (ply → vtp for pycurv).
 - **Morphology extraction**: `curvature` (pycurv, via `pycurv`), `refine_mesh` / `accept_refinement`, `intradistance_verticality` and `interdistance_orientation` (wrapped by `distances_orientations`), `sample_density` + `measure_thickness`.
-- **Quantification**: `morphometrics_stats` (pandas classes/helpers; `stats` assembles the Experiment pickle), plus [Paraview](https://www.paraview.org/) for 3D surface mapping. See the **[Quantifications Documentation](quantifications_documentation.md)**.
+- **Quantification**: `morphometrics_stats` (pandas classes/helpers; `stats` assembles the Experiment pickle), plus [Paraview](https://www.paraview.org/) for 3D surface mapping. See the **[Quantifications Documentation](docs/quantifications.md)**.
 
 ### File types
 - `.xyz` — point clouds (flat text `X Y Z` per line), nm or Å scale.
