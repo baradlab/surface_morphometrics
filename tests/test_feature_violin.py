@@ -50,9 +50,12 @@ def test_collect_feature_skips_classes_without_the_column(tmp_path):
     config = _write_dataset(tmp_path)
     labels, records = fv.collect_feature(config, "IMM_dist")
     assert labels == ["OMM", "IMM", "ER"]          # config order preserved
-    found = {label for label, _tomo, _v, _a in records}
+    found = {label for label, _unit, _strat, _v, _a in records}
     assert found == {"OMM", "ER"}                   # IMM lacks IMM_dist
     assert len(records) == 4                        # 2 classes x 2 tomograms
+    # not split -> unit == stratum == tomogram
+    for _label, unit, stratum, _v, _a in records:
+        assert unit == stratum
 
 
 def test_collect_feature_drops_nonfinite_and_zero_area(tmp_path):
@@ -61,8 +64,28 @@ def test_collect_feature_drops_nonfinite_and_zero_area(tmp_path):
     pd.DataFrame({"IMM_dist": [1.0, np.nan, 3.0, 4.0],
                   "area": [1.0, 1.0, 0.0, 2.0]}).to_csv(work + "T1_OMM.AVV_rh9.csv", index=False)
     _labels, records = fv.collect_feature(config, "IMM_dist")
-    values = next(v for label, tomo, v, _a in records if label == "OMM" and tomo == "T1")
+    values = next(v for label, unit, _s, v, _a in records if label == "OMM" and unit == "T1")
     assert list(values) == [1.0, 4.0]               # NaN and zero-area rows dropped
+
+
+def test_collect_feature_split_components(tmp_path):
+    seg, work = tmp_path / "seg", tmp_path / "work"
+    seg.mkdir(); work.mkdir()
+    (seg / "T1.mrc").touch()
+    # one OMM surface with two organelles (component_number 1 and 2), plus id 0 (no patch)
+    pd.DataFrame({"IMM_dist": [10.0, 11.0, 20.0, 21.0, 99.0],
+                  "area": [1.0, 1.0, 1.0, 1.0, 1.0],
+                  "component_number": [1, 1, 2, 2, 0]}
+                 ).to_csv(work / "T1_OMM.AVV_rh9.csv", index=False)
+    config = {"seg_dir": str(seg) + "/", "work_dir": str(work) + "/",
+              "segmentation_values": {"OMM": 1}, "curvature_measurements": {"radius_hit": 9}}
+    _labels, records = fv.collect_feature(config, "IMM_dist", split_components=True)
+    assert len(records) == 2                                   # two organelles, id 0 dropped
+    units = sorted(r[1] for r in records)
+    assert units == ["T1#c1", "T1#c2"]
+    assert all(r[2] == "T1" for r in records)                 # stratum is the tomogram
+    vals = {r[1]: sorted(r[3]) for r in records}
+    assert vals["T1#c1"] == [10.0, 11.0] and vals["T1#c2"] == [20.0, 21.0]
 
 
 def test_violin_writes_svg_and_png(tmp_path):

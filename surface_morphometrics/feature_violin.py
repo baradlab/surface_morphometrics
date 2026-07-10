@@ -55,12 +55,19 @@ def summary_statistic(values, areas, statistic, bins=100, bin_range=None):
     raise ValueError(f"Unknown statistic: {statistic!r} (expected one of {STATISTICS})")
 
 
-def collect_feature(config, feature):
+def collect_feature(config, feature, split_components=False,
+                    component_column="component_number"):
     """Load every surface that carries `feature`.
 
     Returns (labels, records) where labels is the configured class order and records
-    is a list of (label, tomogram, values, areas) with non-finite / zero-area
-    triangles removed.
+    is a list of (label, unit, stratum, values, areas) with non-finite / zero-area
+    triangles removed. `unit` is the point plotted; `stratum` is the tomogram it came
+    from (for intraclass-correlation and nested tests).
+
+    With `split_components`, each surface is split by its connected-component column
+    (organelles) into one record per component (id > 0), so each organelle is a unit;
+    the whole surface's tomogram remains the stratum. Otherwise the whole surface is
+    one unit and the stratum is the tomogram.
     """
     work_dir = config["work_dir"]
     radius_hit = config.get("curvature_measurements", {}).get("radius_hit", 9)
@@ -79,10 +86,19 @@ def collect_feature(config, feature):
                 continue
             values = df[feature].to_numpy(dtype=float)
             areas = df["area"].to_numpy(dtype=float)
-            keep = np.isfinite(values) & np.isfinite(areas) & (areas > 0)
-            if not keep.any():
-                continue
-            records.append((label, tomo, values[keep], areas[keep]))
+            finite = np.isfinite(values) & np.isfinite(areas) & (areas > 0)
+
+            if split_components:
+                if component_column not in df.columns:
+                    continue
+                comp = df[component_column].to_numpy()
+                for cid in np.unique(comp[comp > 0]):
+                    keep = finite & (comp == cid)
+                    if keep.any():
+                        records.append((label, f"{tomo}#c{int(cid)}", tomo,
+                                        values[keep], areas[keep]))
+            elif finite.any():
+                records.append((label, tomo, tomo, values[finite], areas[finite]))
     return labels, records
 
 
@@ -103,12 +119,21 @@ def collect_feature(config, feature):
               help="Run pairwise significance tests between classes and draw stars on "
                    "the plot from the chosen test: 'mwu' (Mann-Whitney U) or 'ttest' "
                    "(Welch). Both tests are always written to a *_tests.csv.")
+@click.option("--split-components", is_flag=True, default=False,
+              help="Treat each connected component (organelle) as a unit instead of the "
+                   "whole surface. One point per organelle; reports the intraclass "
+                   "correlation (ICC) so you can judge whether organelles cluster by "
+                   "tomogram. Off by default (unit = tomogram).")
+@click.option("--component-column", default="component_number", show_default=True,
+              help="Per-triangle column holding the connected-component id (from "
+                   "`morphometrics label_components`); used with --split-components.")
 @click.option("--output", default=None,
               help="Output .svg path (default: work_dir/<feature>_<statistic>_violin.svg). "
-                   "A matching .png and .csv of the per-tomogram values are written too.")
+                   "A matching .png and .csv of the per-unit values are written too.")
 @click.option("--figuresize", nargs=2, type=float, default=(5.0, 4.0), show_default=True,
               help="Figure size in inches (x y).")
-def violin_cli(configfile, feature, statistic, bins, bin_range, test, output, figuresize):
+def violin_cli(configfile, feature, statistic, bins, bin_range, test, split_components,
+               component_column, output, figuresize):
     """Violin plot of one FEATURE across membrane classes, one point per tomogram.
 
     CONFIGFILE: path to config.yml.
@@ -124,33 +149,47 @@ def violin_cli(configfile, feature, statistic, bins, bin_range, test, output, fi
     compares the per-tomogram summary values (comparison_level column), NOT the pooled
     triangle distributions with the effective-n correction in ks_statistics().
 
-    Note that Mann-Whitney U has a p-value floor set by the number of tomograms (with
+    Note that Mann-Whitney U has a p-value floor set by the number of units (with
     n=6 vs 6 it cannot go below ~0.002, so **** is unreachable no matter how separated
     the groups are). Welch's t-test has no such floor but assumes roughly normal means.
+
+    With --split-components each connected component (organelle) is a unit instead of the
+    whole surface, giving one point per organelle and reporting the intraclass
+    correlation (ICC) per class. Organelles are treated as independent points (flat), so
+    if the ICC is high (organelles cluster by tomogram) the between-class stars overstate
+    significance -- prefer per-tomogram in that case. For a treatment comparison where the
+    condition is assigned per tomogram, use spatial_stats.permutation_test(strata=...),
+    which permutes at the tomogram level while still using every organelle.
     """
     config = load_config(configfile, require=("seg_dir", "work_dir", "segmentation_values"))
-    labels, records = collect_feature(config, feature)
+    labels, records = collect_feature(config, feature, split_components=split_components,
+                                      component_column=component_column)
     if not records:
+        extra = (f" (with connected-component column '{component_column}')"
+                 if split_components else "")
         raise click.ClickException(
-            f"No surfaces in {config['work_dir']} have a '{feature}' column. "
+            f"No surfaces in {config['work_dir']} have a '{feature}' column{extra}. "
             f"Check the feature name and that the pipeline has been run.")
 
     # For `peak`, share one histogram range across every class so the peaks are
     # directly comparable (matching how the published scripts fixed the range).
     if statistic == "peak" and bin_range is None:
-        all_values = np.concatenate([r[2] for r in records])
+        all_values = np.concatenate([r[3] for r in records])
         bin_range = (float(all_values.min()), float(all_values.max()))
 
     values_by_label = {}
-    tomos_by_label = {}
-    for label, tomo, values, areas in records:
+    units_by_label = {}
+    strata_by_label = {}
+    for label, unit, stratum, values, areas in records:
         stat = summary_statistic(values, areas, statistic, bins=bins, bin_range=bin_range)
         values_by_label.setdefault(label, []).append(stat)
-        tomos_by_label.setdefault(label, []).append(tomo)
+        units_by_label.setdefault(label, []).append(unit)
+        strata_by_label.setdefault(label, []).append(stratum)
 
     used = [label for label in labels if label in values_by_label]
     datasets = [values_by_label[label] for label in used]
 
+    unit_name_str = "organelle(s)" if split_components else "tomogram(s)"
     stat_name = {"mean": "area-weighted mean",
                  "median": "area-weighted median",
                  "peak": "histogram peak (mode)"}[statistic]
@@ -159,18 +198,30 @@ def violin_cli(configfile, feature, statistic, bins, bin_range, test, output, fi
         print(f"  Histogram: {bins} bins over range {bin_range[0]:.3f} - {bin_range[1]:.3f}")
     for label in used:
         vals = np.asarray(values_by_label[label], dtype=float)
-        print(f"  {label}: n={len(vals)} tomogram(s), "
-              f"{stat_name} = {vals.mean():.3f} +/- {vals.std():.3f}")
+        line = (f"  {label}: n={len(vals)} {unit_name_str}, "
+                f"{stat_name} = {vals.mean():.3f} +/- {vals.std():.3f}")
+        if split_components:
+            from .spatial_stats import intraclass_correlation
+            icc = intraclass_correlation(values_by_label[label], strata_by_label[label])
+            n_tomo = len(set(strata_by_label[label]))
+            line += f"  [{n_tomo} tomogram(s), ICC={icc:.2f}]"
+        print(line)
+    if split_components:
+        print("  NOTE: organelles are treated as independent points here (flat). If ICC is")
+        print("        high, organelles cluster by tomogram and between-class stars overstate")
+        print("        significance -- prefer per-tomogram (drop --split-components).")
 
     out_svg = output or f"{config['work_dir']}{feature}_{statistic}_violin.svg"
     if not out_svg.endswith(".svg"):
         out_svg += ".svg"
 
-    # Tidy per-tomogram table alongside the figure, for downstream stats.
-    rows = [{"tomogram": tomo, "class": label, "feature": feature,
+    # Tidy per-unit table alongside the figure, for downstream stats. `unit` is the
+    # plotted point (tomogram, or organelle when split); `tomogram` is its stratum.
+    rows = [{"unit": unit, "tomogram": stratum, "class": label, "feature": feature,
              "statistic": statistic, "value": value}
             for label in used
-            for tomo, value in zip(tomos_by_label[label], values_by_label[label])]
+            for unit, stratum, value in zip(units_by_label[label], strata_by_label[label],
+                                            values_by_label[label])]
     csv_path = out_svg[:-4] + ".csv"
     pd.DataFrame(rows).to_csv(csv_path, index=False)
 
