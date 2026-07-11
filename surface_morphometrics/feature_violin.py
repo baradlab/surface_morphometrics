@@ -60,13 +60,16 @@ def summary_statistic(values, areas, statistic, bins=100, bin_range=None):
 
 
 def collect_feature(config, feature, split_components=False,
-                    component_column="component_number", filters=None):
+                    component_column="component_number", filters=None,
+                    include_tomograms=None, exclude_tomograms=None,
+                    min_triangles=0, min_area=0.0):
     """Load every surface that carries `feature`.
 
-    Returns (labels, records) where labels is the configured class order and records
-    is a list of (label, unit, stratum, values, areas) with non-finite / zero-area
+    Returns (labels, records, diagnostics) where labels is the configured class order and
+    records is a list of (label, unit, stratum, values, areas) with non-finite / zero-area
     triangles removed. `unit` is the point plotted; `stratum` is the tomogram it came
-    from (for intraclass-correlation and nested tests).
+    from (for intraclass-correlation and nested tests). `diagnostics` reports the units
+    that selection removed (see below).
 
     With `split_components`, each surface is split by its connected-component column
     (organelles) into one record per component (id > 0), so each organelle is a unit;
@@ -76,14 +79,36 @@ def collect_feature(config, feature, split_components=False,
     `filters` is a list of parsed clause dicts (see surface_filters.parse_filters):
     triangles are kept only where the applicable clauses hold, per class, before the
     feature is summarized. A surface left with no triangles is dropped as a unit.
+
+    Unit selection (see surface_selection): `include_tomograms` / `exclude_tomograms` are
+    name-or-glob lists choosing which tomograms load at all; `min_triangles` / `min_area`
+    drop a surface or organelle that, after filtering, is too small to be a data point.
+
+    `diagnostics` is a dict: `used_tomograms` / `excluded_tomograms` (by the include/
+    exclude lists) and `dropped_units` (surviving-but-too-small units removed by the size
+    thresholds).
     """
     from .surface_filters import filter_mask
+    from .surface_selection import select_tomograms, passes_size
 
     work_dir = config["work_dir"]
     radius_hit = config.get("curvature_measurements", {}).get("radius_hit", 9)
     extension = f".AVV_rh{radius_hit}.csv"
     labels = list(config["segmentation_values"].keys())
-    tomograms = sorted(os.path.basename(f)[:-4] for f in glob(config["seg_dir"] + "*.mrc"))
+    all_tomograms = sorted(os.path.basename(f)[:-4] for f in glob(config["seg_dir"] + "*.mrc"))
+    tomograms, excluded = select_tomograms(all_tomograms, include_tomograms, exclude_tomograms)
+
+    dropped_units = 0
+
+    def _emit(records, label, unit, stratum, values, areas, keep):
+        """Append a unit's surviving triangles unless it falls below the size thresholds."""
+        nonlocal dropped_units
+        if not keep.any():
+            return
+        if not passes_size(int(keep.sum()), float(areas[keep].sum()), min_triangles, min_area):
+            dropped_units += 1
+            return
+        records.append((label, unit, stratum, values[keep], areas[keep]))
 
     records = []
     for label in labels:
@@ -105,13 +130,14 @@ def collect_feature(config, feature, split_components=False,
                     continue
                 comp = df[component_column].to_numpy()
                 for cid in np.unique(comp[comp > 0]):
-                    keep = finite & (comp == cid)
-                    if keep.any():
-                        records.append((label, f"{tomo}#c{int(cid)}", tomo,
-                                        values[keep], areas[keep]))
-            elif finite.any():
-                records.append((label, tomo, tomo, values[finite], areas[finite]))
-    return labels, records
+                    _emit(records, label, f"{tomo}#c{int(cid)}", tomo, values, areas,
+                          finite & (comp == cid))
+            else:
+                _emit(records, label, tomo, tomo, values, areas, finite)
+
+    diagnostics = {"used_tomograms": tomograms, "excluded_tomograms": excluded,
+                   "dropped_units": dropped_units}
+    return labels, records, diagnostics
 
 
 @click.command(name="violin")
@@ -136,6 +162,21 @@ def collect_feature(config, feature, split_components=False,
                    "summarizing (repeatable, ANDed; OP in >= <= == != > <). E.g. "
                    "'IMM:OMM_dist>=20' isolates cristae; a range is two filters "
                    "('IMM:OMM_dist>=5' '...<=20'). Merged with config statistics.filters.")
+@click.option("--include-tomograms", "include_tomograms", multiple=True,
+              help="Only use tomograms whose name matches one of these names or glob "
+                   "patterns (repeatable), e.g. 'TF*'. Merged with config "
+                   "statistics.include_tomograms; empty means all tomograms.")
+@click.option("--exclude-tomograms", "exclude_tomograms", multiple=True,
+              help="Skip tomograms whose name matches one of these names or glob patterns "
+                   "(repeatable), e.g. known-bad tomograms 'UF3'. Exclude wins over "
+                   "include. Merged with config statistics.exclude_tomograms.")
+@click.option("--min-triangles", type=int, default=0,
+              help="Drop any surface/organelle left with fewer than this many triangles "
+                   "after filtering (default: keep all). Overrides config "
+                   "statistics.min_triangles when set.")
+@click.option("--min-area", type=float, default=0.0,
+              help="Drop any surface/organelle whose total post-filter area is below this "
+                   "(default: keep all). Overrides config statistics.min_area when set.")
 @click.option("--split-components", is_flag=True, default=False,
               help="Treat each connected component (organelle) as a unit instead of the "
                    "whole surface. One point per organelle; reports the intraclass "
@@ -150,6 +191,7 @@ def collect_feature(config, feature, split_components=False,
 @click.option("--figuresize", nargs=2, type=float, default=(5.0, 4.0), show_default=True,
               help="Figure size in inches (x y).")
 def violin_cli(configfile, feature, statistic, bins, bin_range, test, filters,
+               include_tomograms, exclude_tomograms, min_triangles, min_area,
                split_components, component_column, output, figuresize):
     """Violin plot of one FEATURE across membrane classes, one point per tomogram.
 
@@ -182,18 +224,43 @@ def violin_cli(configfile, feature, statistic, bins, bin_range, test, filters,
     --filter keeps only triangles matching a per-class comparison before summarizing
     (e.g. '--filter IMM:OMM_dist>=20' to quantify only the cristae of the IMM). Filters
     are ANDed; a range is two filters. They are merged with any config statistics.filters.
+
+    Unit selection chooses which surfaces enter the analysis, distinct from filtering
+    triangles within them: --include-tomograms / --exclude-tomograms take names or glob
+    patterns (replacing hardcoded name lists), and --min-triangles / --min-area drop
+    surfaces or organelles too small to be reliable data points.
     """
     from .surface_filters import parse_filters, describe
+    from .surface_selection import describe_selection
 
     config = load_config(configfile, require=("seg_dir", "work_dir", "segmentation_values"))
-    stats_cfg = config.get("statistics", {})
-    config_filters = stats_cfg.get("filters", []) if isinstance(stats_cfg, dict) else []
-    clauses = parse_filters(list(config_filters) + list(filters))
+    stats_cfg = config.get("statistics", {}) or {}
+    if not isinstance(stats_cfg, dict):
+        stats_cfg = {}
+    clauses = parse_filters(list(stats_cfg.get("filters", [])) + list(filters))
+    include = list(stats_cfg.get("include_tomograms", [])) + list(include_tomograms)
+    exclude = list(stats_cfg.get("exclude_tomograms", [])) + list(exclude_tomograms)
+    # CLI thresholds (nonzero) override the config; otherwise fall back to config.
+    min_triangles = min_triangles or stats_cfg.get("min_triangles", 0)
+    min_area = min_area or stats_cfg.get("min_area", 0.0)
+
     if clauses:
         print(f"Triangle filter: {describe(clauses)}")
+    selection_str = describe_selection(include, exclude, min_triangles, min_area)
+    if selection_str:
+        print(f"Unit selection: {selection_str}")
 
-    labels, records = collect_feature(config, feature, split_components=split_components,
-                                      component_column=component_column, filters=clauses)
+    labels, records, diag = collect_feature(
+        config, feature, split_components=split_components,
+        component_column=component_column, filters=clauses,
+        include_tomograms=include, exclude_tomograms=exclude,
+        min_triangles=min_triangles, min_area=min_area)
+    if diag["excluded_tomograms"] and (include or exclude):
+        ex = diag["excluded_tomograms"]
+        shown = ", ".join(ex[:10]) + (" ..." if len(ex) > 10 else "")
+        print(f"  Selection excluded {len(ex)} tomogram(s): {shown}")
+    if diag["dropped_units"]:
+        print(f"  Size thresholds dropped {diag['dropped_units']} surface(s)/organelle(s).")
     if not records:
         extra = (f" (with connected-component column '{component_column}')"
                  if split_components else "")
@@ -201,7 +268,7 @@ def violin_cli(configfile, feature, statistic, bins, bin_range, test, filters,
             extra += f" surviving the filter [{describe(clauses)}]"
         raise click.ClickException(
             f"No surfaces in {config['work_dir']} have a '{feature}' column{extra}. "
-            f"Check the feature name and that the pipeline has been run.")
+            f"Check the feature name, the pipeline run, and any tomogram selection.")
 
     # For `peak`, share one histogram range across every class so the peaks are
     # directly comparable (matching how the published scripts fixed the range).

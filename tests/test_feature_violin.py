@@ -7,6 +7,7 @@ import yaml
 from surface_morphometrics import feature_violin as fv
 from surface_morphometrics import morphometrics_stats as ms
 from surface_morphometrics import surface_filters as sf
+from surface_morphometrics import surface_selection as ss
 from surface_morphometrics.morphometrics_stats import significance_stars, violin
 
 
@@ -60,7 +61,7 @@ def _write_dataset(tmp_path, feature="IMM_dist"):
 
 def test_collect_feature_skips_classes_without_the_column(tmp_path):
     config = _write_dataset(tmp_path)
-    labels, records = fv.collect_feature(config, "IMM_dist")
+    labels, records, _diag = fv.collect_feature(config, "IMM_dist")
     assert labels == ["OMM", "IMM", "ER"]          # config order preserved
     found = {label for label, _unit, _strat, _v, _a in records}
     assert found == {"OMM", "ER"}                   # IMM lacks IMM_dist
@@ -75,7 +76,7 @@ def test_collect_feature_drops_nonfinite_and_zero_area(tmp_path):
     work = config["work_dir"]
     pd.DataFrame({"IMM_dist": [1.0, np.nan, 3.0, 4.0],
                   "area": [1.0, 1.0, 0.0, 2.0]}).to_csv(work + "T1_OMM.AVV_rh9.csv", index=False)
-    _labels, records = fv.collect_feature(config, "IMM_dist")
+    _labels, records, _diag = fv.collect_feature(config, "IMM_dist")
     values = next(v for label, unit, _s, v, _a in records if label == "OMM" and unit == "T1")
     assert list(values) == [1.0, 4.0]               # NaN and zero-area rows dropped
 
@@ -91,7 +92,7 @@ def test_collect_feature_split_components(tmp_path):
                  ).to_csv(work / "T1_OMM.AVV_rh9.csv", index=False)
     config = {"seg_dir": str(seg) + "/", "work_dir": str(work) + "/",
               "segmentation_values": {"OMM": 1}, "curvature_measurements": {"radius_hit": 9}}
-    _labels, records = fv.collect_feature(config, "IMM_dist", split_components=True)
+    _labels, records, _diag = fv.collect_feature(config, "IMM_dist", split_components=True)
     assert len(records) == 2                                   # two organelles, id 0 dropped
     units = sorted(r[1] for r in records)
     assert units == ["T1#c1", "T1#c2"]
@@ -230,7 +231,7 @@ def test_collect_feature_applies_filter(tmp_path):
     config = {"seg_dir": str(seg) + "/", "work_dir": str(work) + "/",
               "segmentation_values": {"OMM": 1}, "curvature_measurements": {"radius_hit": 9}}
     clauses = sf.parse_filters(["OMM_dist>=20"])
-    _labels, records = fv.collect_feature(config, "IMM_dist", filters=clauses)
+    _labels, records, _diag = fv.collect_feature(config, "IMM_dist", filters=clauses)
     values = next(v for label, _u, _s, v, _a in records if label == "OMM")
     assert sorted(values) == [30.0, 31.0]
 
@@ -242,6 +243,84 @@ def test_collect_feature_filter_drops_empty_surface(tmp_path):
     pd.DataFrame({"IMM_dist": [12.0, 13.0], "OMM_dist": [1.0, 2.0],
                   "area": [1.0, 1.0]}).to_csv(work + "T1_OMM.AVV_rh9.csv", index=False)
     clauses = sf.parse_filters(["OMM_dist>=100"])
-    _labels, records = fv.collect_feature(config, "IMM_dist", filters=clauses)
+    _labels, records, _diag = fv.collect_feature(config, "IMM_dist", filters=clauses)
     # Every surface either lacks OMM_dist (excluded) or has nothing passing -> no records.
     assert records == []
+
+
+# --- unit-level selection (surface_selection) ----------------------------------------
+
+def test_select_tomogram_include_exclude():
+    # no include -> all pass
+    assert ss.select_tomogram("TF1")
+    # include glob keeps only matches
+    assert ss.select_tomogram("TF1", include=["TF*"])
+    assert not ss.select_tomogram("UE2", include=["TF*"])
+    # exclude wins over include
+    assert not ss.select_tomogram("TF1", include=["TF*"], exclude=["TF1"])
+    # exclude glob
+    assert not ss.select_tomogram("UF3", exclude=["UF?"])
+
+
+def test_select_tomograms_splits_and_preserves_order():
+    used, excluded = ss.select_tomograms(["TE1", "TF1", "UE1", "UF3"],
+                                         include=["T*"], exclude=["TE1"])
+    assert used == ["TF1"]
+    assert excluded == ["TE1", "UE1", "UF3"]
+
+
+def test_passes_size_thresholds():
+    assert ss.passes_size(10, 5.0, min_triangles=5, min_area=4.0)
+    assert not ss.passes_size(3, 5.0, min_triangles=5)
+    assert not ss.passes_size(10, 2.0, min_area=4.0)
+    assert ss.passes_size(0, 0.0)                       # no thresholds -> always passes
+
+
+def test_describe_selection():
+    assert ss.describe_selection(["TF*"], ["UF3"], 100, 2.5) == \
+        "include TF*, exclude UF3, min_triangles=100, min_area=2.5"
+    assert ss.describe_selection() == ""
+
+
+def test_collect_feature_excludes_tomograms(tmp_path):
+    config = _write_dataset(tmp_path)                   # tomograms T1, T2
+    _labels, records, diag = fv.collect_feature(config, "IMM_dist", exclude_tomograms=["T2"])
+    assert diag["used_tomograms"] == ["T1"]
+    assert diag["excluded_tomograms"] == ["T2"]
+    assert all(stratum == "T1" for _l, _u, stratum, _v, _a in records)
+
+
+def test_collect_feature_include_glob(tmp_path):
+    config = _write_dataset(tmp_path)
+    _labels, records, diag = fv.collect_feature(config, "IMM_dist", include_tomograms=["T1*"])
+    assert diag["used_tomograms"] == ["T1"]
+    assert {u for _l, u, _s, _v, _a in records} == {"T1"}
+
+
+def test_collect_feature_min_triangles_drops_small(tmp_path):
+    seg, work = tmp_path / "seg", tmp_path / "work"
+    seg.mkdir(); work.mkdir()
+    (seg / "T1.mrc").touch()
+    (seg / "T2.mrc").touch()
+    # T1_OMM has 5 triangles, T2_OMM has 2 -> min_triangles=3 keeps only T1
+    pd.DataFrame({"IMM_dist": np.arange(5.0), "area": np.ones(5)}
+                 ).to_csv(work / "T1_OMM.AVV_rh9.csv", index=False)
+    pd.DataFrame({"IMM_dist": np.arange(2.0), "area": np.ones(2)}
+                 ).to_csv(work / "T2_OMM.AVV_rh9.csv", index=False)
+    config = {"seg_dir": str(seg) + "/", "work_dir": str(work) + "/",
+              "segmentation_values": {"OMM": 1}, "curvature_measurements": {"radius_hit": 9}}
+    _labels, records, diag = fv.collect_feature(config, "IMM_dist", min_triangles=3)
+    assert {u for _l, u, _s, _v, _a in records} == {"T1"}
+    assert diag["dropped_units"] == 1
+
+
+def test_collect_feature_min_area_drops_small(tmp_path):
+    seg, work = tmp_path / "seg", tmp_path / "work"
+    seg.mkdir(); work.mkdir()
+    (seg / "T1.mrc").touch()
+    pd.DataFrame({"IMM_dist": [1.0, 2.0], "area": [0.5, 0.5]}    # total area 1.0
+                 ).to_csv(work / "T1_OMM.AVV_rh9.csv", index=False)
+    config = {"seg_dir": str(seg) + "/", "work_dir": str(work) + "/",
+              "segmentation_values": {"OMM": 1}, "curvature_measurements": {"radius_hit": 9}}
+    _labels, records, diag = fv.collect_feature(config, "IMM_dist", min_area=2.0)
+    assert records == [] and diag["dropped_units"] == 1

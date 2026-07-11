@@ -21,6 +21,13 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
   isolates cristae; a range is two filters. Mirrored by a `statistics.filters` config
   block, recorded in the plot title and per-unit CSV. Backed by the new
   `surface_morphometrics.surface_filters` module (structured, no `eval`, serializable).
+- `violin` unit selection, choosing which surfaces enter the analysis (distinct from
+  filtering triangles within them): `--include-tomograms` / `--exclude-tomograms` take
+  names or glob patterns (`'TF*'`, `'?E*'`), replacing hardcoded name lists and
+  filename-character hacks; `--min-triangles` / `--min-area` drop surfaces or organelles
+  too small to be reliable points. Mirrored by `statistics.{include_tomograms,
+  exclude_tomograms,min_triangles,min_area}` config keys; dropped-unit counts are
+  reported. Backed by the new `surface_morphometrics.surface_selection` module.
 - `surface_morphometrics.spatial_stats` — spatially-aware distribution comparison.
   Triangles are strongly autocorrelated, so a pooled two-sample test with n = n_triangles
   is wildly anticonservative (Type-I ~0.9 under H0 in simulation). Provides:
