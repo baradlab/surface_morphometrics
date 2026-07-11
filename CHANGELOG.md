@@ -28,6 +28,16 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
   too small to be reliable points. Mirrored by `statistics.{include_tomograms,
   exclude_tomograms,min_triangles,min_area}` config keys; dropped-unit counts are
   reported. Backed by the new `surface_morphometrics.surface_selection` module.
+- `surface_morphometrics.dataset.Dataset` — a lazy, metadata-aware index of a run's
+  surfaces, successor to `morphometrics_stats.Experiment`. Keeps the `dataset[tomo][class]`
+  access but reads each surface's CSV on demand (assembling the index only globs
+  filenames), and carries per-tomogram metadata from a config `groups:` block that maps
+  tomograms to buckets (condition, morphology, ...) by name or glob — replacing the
+  hardcoded `conditions = [...]` lists and `key[1] == "F"` filename hacks. Group
+  assignment is validated at load (every included tomogram in exactly one bucket per
+  group, or a clear error). Metadata-aware selection via
+  `dataset.surfaces(label="IMM", condition="Tg")`. Documented `statistics:` / `groups:`
+  blocks in `config_template.yml`. `Experiment` stays importable for the pickle scripts.
 - `surface_morphometrics.spatial_stats` — spatially-aware distribution comparison.
   Triangles are strongly autocorrelated, so a pooled two-sample test with n = n_triangles
   is wildly anticonservative (Type-I ~0.9 under H0 in simulation). Provides:

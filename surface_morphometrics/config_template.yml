@@ -99,7 +99,26 @@ mesh_refinement:
   lowpass_sigma: 0  # 3D Gaussian low-pass filter sigma in nm applied to tomogram before sampling. 0 = disabled. Try 1-3 nm for noisy data.
   convergence_threshold: 0.05  # nm - stop iterating (per phase) when mean |offset| drops below this.
 
+# STATISTICS AND PLOTTING (used by the analysis commands, e.g. `morphometrics violin`)
+# All keys are optional. Filtering/selection here mirror the command-line flags, so a
+# saved analysis is reproducible. Uncomment and edit as needed.
+# statistics:
+#   filters: [IMM:OMM_dist>=20]   # keep only triangles matching [CLASS:]PROPERTY OP VALUE (ANDed; a range is two filters). Isolates e.g. cristae.
+#   include_tomograms: [TF*, UF*] # only analyze tomograms matching these names/globs (empty = all)
+#   exclude_tomograms: [UF3, TE1] # skip these tomograms (names/globs); exclude wins over include
+#   min_triangles: 0              # drop a surface/organelle left with fewer than this many triangles after filtering
+#   min_area: 0                   # drop a surface/organelle whose total post-filter area is below this
 
+# TOMOGRAM GROUPS (metadata for treatment/morphology comparisons)
+# Maps each tomogram to a bucket per group, by name or glob, replacing hardcoded lists.
+# Every included tomogram must land in exactly one bucket per group (validated at load).
+# groups:
+#   condition:
+#     Tg:      [TF*, UF*]
+#     Vehicle: [TE*, UE*]
+#   morphology:
+#     fragmented: ["?F*"]
+#     elongated:  ["?E*"]
 
 
 

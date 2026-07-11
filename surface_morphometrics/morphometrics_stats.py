@@ -71,8 +71,13 @@ def weighted_avg_and_std(values, weights):
 
 class Experiment():
     """Experiments are containers for a series of tomograms and their pandas dataframes
-    
-    Access pattern: experiment[tomoname][label]."""
+
+    Access pattern: experiment[tomoname][label].
+
+    Superseded by :class:`surface_morphometrics.dataset.Dataset`, which loads surfaces
+    lazily, carries config-driven per-tomogram metadata (the `groups:` block), and feeds
+    the unified statistics tools. `Experiment` is kept for the pickle-based scripts in
+    `old_scripts/`; prefer `Dataset` for new analysis."""
     def __init__(self, name):
         self.name = name
         self.tomograms = {}
