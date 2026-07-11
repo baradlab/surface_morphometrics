@@ -16,6 +16,11 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
   the feature per surface. Classes lacking the feature are skipped. `--test {mwu,ttest}`
   annotates significance stars and writes a `*_tests.csv` (Mann-Whitney U, Welch t, and
   a paired summary-statistic KS, tagged with a `comparison_level` column).
+- `violin --filter '[CLASS:]PROPERTY OP VALUE'` (repeatable, ANDed) keeps only triangles
+  matching a per-class comparison before summarizing — e.g. `--filter 'IMM:OMM_dist>=20'`
+  isolates cristae; a range is two filters. Mirrored by a `statistics.filters` config
+  block, recorded in the plot title and per-unit CSV. Backed by the new
+  `surface_morphometrics.surface_filters` module (structured, no `eval`, serializable).
 - `surface_morphometrics.spatial_stats` — spatially-aware distribution comparison.
   Triangles are strongly autocorrelated, so a pooled two-sample test with n = n_triangles
   is wildly anticonservative (Type-I ~0.9 under H0 in simulation). Provides:

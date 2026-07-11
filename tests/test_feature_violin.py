@@ -6,6 +6,7 @@ import yaml
 
 from surface_morphometrics import feature_violin as fv
 from surface_morphometrics import morphometrics_stats as ms
+from surface_morphometrics import surface_filters as sf
 from surface_morphometrics.morphometrics_stats import significance_stars, violin
 
 
@@ -156,3 +157,91 @@ def test_pairwise_tests_three_classes_and_degenerate_input():
     degenerate = ms.pairwise_tests([[5, 5, 5], [5, 5, 5]], ["A", "B"])[0]
     assert degenerate["ttest_stars"] == "n/a"
     assert degenerate["mwu_stars"] == "ns"
+
+
+# --- triangle-level filtering (surface_filters) --------------------------------------
+
+def test_parse_filter_valid_and_scoped():
+    c = sf.parse_filter("OMM_dist>=20")
+    assert c["cls"] is None and c["prop"] == "OMM_dist" and c["op"] == ">=" and c["value"] == 20.0
+    c = sf.parse_filter("IMM:OMM_dist<12.5")
+    assert c["cls"] == "IMM" and c["prop"] == "OMM_dist" and c["op"] == "<" and c["value"] == 12.5
+    # scientific notation and signed values parse
+    assert sf.parse_filter("curvedness_VV<=1e-2")["value"] == pytest.approx(0.01)
+    assert sf.parse_filter("IMM_dist>-5")["value"] == -5.0
+
+
+def test_parse_filter_all_operators():
+    for op in (">=", "<=", "==", "!=", ">", "<"):
+        assert sf.parse_filter(f"p{op}1")["op"] == op
+
+
+@pytest.mark.parametrize("bad", ["", "OMM_dist", "OMM_dist=>5", "OMM dist>5",
+                                 "prop>", ">5", "a:b:c>5", "prop~5"])
+def test_parse_filter_rejects_malformed(bad):
+    with pytest.raises(ValueError):
+        sf.parse_filter(bad)
+
+
+def test_filter_mask_per_class_scoping():
+    df = pd.DataFrame({"OMM_dist": [5.0, 15.0, 25.0], "area": [1.0, 1.0, 1.0]})
+    clauses = sf.parse_filters(["IMM:OMM_dist>=20"])
+    # scoped to IMM -> applies to IMM, not to OMM
+    assert list(sf.filter_mask(df, clauses, "IMM")) == [False, False, True]
+    assert list(sf.filter_mask(df, clauses, "OMM")) == [True, True, True]
+    # unscoped -> applies to every class
+    unscoped = sf.parse_filters(["OMM_dist>=20"])
+    assert list(sf.filter_mask(df, unscoped, "OMM")) == [False, False, True]
+
+
+def test_filter_mask_range_is_two_clauses():
+    df = pd.DataFrame({"OMM_dist": [1.0, 5.0, 12.0, 20.0, 30.0]})
+    clauses = sf.parse_filters(["OMM_dist>=5", "OMM_dist<=20"])
+    assert list(sf.filter_mask(df, clauses, "IMM")) == [False, True, True, True, False]
+
+
+def test_filter_mask_missing_property_excludes_all():
+    df = pd.DataFrame({"area": [1.0, 2.0]})
+    clauses = sf.parse_filters(["OMM_dist>=5"])
+    assert list(sf.filter_mask(df, clauses, "OMM")) == [False, False]
+
+
+def test_filter_mask_nan_never_passes():
+    df = pd.DataFrame({"OMM_dist": [5.0, np.nan, 25.0]})
+    clauses = sf.parse_filters(["OMM_dist>=0"])
+    assert list(sf.filter_mask(df, clauses, "OMM")) == [True, False, True]
+
+
+def test_describe_roundtrips_specs():
+    clauses = sf.parse_filters(["IMM:OMM_dist>=5", "IMM:OMM_dist<=20"])
+    assert sf.describe(clauses) == "IMM:OMM_dist>=5, IMM:OMM_dist<=20"
+    assert sf.describe([]) == ""
+
+
+def test_collect_feature_applies_filter(tmp_path):
+    seg, work = tmp_path / "seg", tmp_path / "work"
+    seg.mkdir(); work.mkdir()
+    (seg / "T1.mrc").touch()
+    # OMM triangles span OMM_dist; only the two >=20 should survive an IMM-unscoped filter
+    pd.DataFrame({"IMM_dist": [10.0, 11.0, 30.0, 31.0],
+                  "OMM_dist": [5.0, 8.0, 25.0, 40.0],
+                  "area": [1.0, 1.0, 1.0, 1.0]}
+                 ).to_csv(work / "T1_OMM.AVV_rh9.csv", index=False)
+    config = {"seg_dir": str(seg) + "/", "work_dir": str(work) + "/",
+              "segmentation_values": {"OMM": 1}, "curvature_measurements": {"radius_hit": 9}}
+    clauses = sf.parse_filters(["OMM_dist>=20"])
+    _labels, records = fv.collect_feature(config, "IMM_dist", filters=clauses)
+    values = next(v for label, _u, _s, v, _a in records if label == "OMM")
+    assert sorted(values) == [30.0, 31.0]
+
+
+def test_collect_feature_filter_drops_empty_surface(tmp_path):
+    config = _write_dataset(tmp_path)          # OMM mu=12, ER mu=25, no OMM_dist column
+    work = config["work_dir"]
+    # Give one OMM surface an OMM_dist column where nothing passes; the other has none.
+    pd.DataFrame({"IMM_dist": [12.0, 13.0], "OMM_dist": [1.0, 2.0],
+                  "area": [1.0, 1.0]}).to_csv(work + "T1_OMM.AVV_rh9.csv", index=False)
+    clauses = sf.parse_filters(["OMM_dist>=100"])
+    _labels, records = fv.collect_feature(config, "IMM_dist", filters=clauses)
+    # Every surface either lacks OMM_dist (excluded) or has nothing passing -> no records.
+    assert records == []

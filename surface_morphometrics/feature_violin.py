@@ -60,7 +60,7 @@ def summary_statistic(values, areas, statistic, bins=100, bin_range=None):
 
 
 def collect_feature(config, feature, split_components=False,
-                    component_column="component_number"):
+                    component_column="component_number", filters=None):
     """Load every surface that carries `feature`.
 
     Returns (labels, records) where labels is the configured class order and records
@@ -72,7 +72,13 @@ def collect_feature(config, feature, split_components=False,
     (organelles) into one record per component (id > 0), so each organelle is a unit;
     the whole surface's tomogram remains the stratum. Otherwise the whole surface is
     one unit and the stratum is the tomogram.
+
+    `filters` is a list of parsed clause dicts (see surface_filters.parse_filters):
+    triangles are kept only where the applicable clauses hold, per class, before the
+    feature is summarized. A surface left with no triangles is dropped as a unit.
     """
+    from .surface_filters import filter_mask
+
     work_dir = config["work_dir"]
     radius_hit = config.get("curvature_measurements", {}).get("radius_hit", 9)
     extension = f".AVV_rh{radius_hit}.csv"
@@ -91,6 +97,8 @@ def collect_feature(config, feature, split_components=False,
             values = df[feature].to_numpy(dtype=float)
             areas = df["area"].to_numpy(dtype=float)
             finite = np.isfinite(values) & np.isfinite(areas) & (areas > 0)
+            if filters:
+                finite = finite & filter_mask(df, filters, label)
 
             if split_components:
                 if component_column not in df.columns:
@@ -123,6 +131,11 @@ def collect_feature(config, feature, split_components=False,
               help="Run pairwise significance tests between classes and draw stars on "
                    "the plot from the chosen test: 'mwu' (Mann-Whitney U) or 'ttest' "
                    "(Welch). Both tests are always written to a *_tests.csv.")
+@click.option("--filter", "filters", multiple=True,
+              help="Keep only triangles matching [CLASS:]PROPERTY OP VALUE before "
+                   "summarizing (repeatable, ANDed; OP in >= <= == != > <). E.g. "
+                   "'IMM:OMM_dist>=20' isolates cristae; a range is two filters "
+                   "('IMM:OMM_dist>=5' '...<=20'). Merged with config statistics.filters.")
 @click.option("--split-components", is_flag=True, default=False,
               help="Treat each connected component (organelle) as a unit instead of the "
                    "whole surface. One point per organelle; reports the intraclass "
@@ -136,8 +149,8 @@ def collect_feature(config, feature, split_components=False,
                    "A matching .png and .csv of the per-unit values are written too.")
 @click.option("--figuresize", nargs=2, type=float, default=(5.0, 4.0), show_default=True,
               help="Figure size in inches (x y).")
-def violin_cli(configfile, feature, statistic, bins, bin_range, test, split_components,
-               component_column, output, figuresize):
+def violin_cli(configfile, feature, statistic, bins, bin_range, test, filters,
+               split_components, component_column, output, figuresize):
     """Violin plot of one FEATURE across membrane classes, one point per tomogram.
 
     CONFIGFILE: path to config.yml.
@@ -165,13 +178,27 @@ def violin_cli(configfile, feature, statistic, bins, bin_range, test, split_comp
     significance -- prefer per-tomogram in that case. For a treatment comparison where the
     condition is assigned per tomogram, use spatial_stats.permutation_test(strata=...),
     which permutes at the tomogram level while still using every organelle.
+
+    --filter keeps only triangles matching a per-class comparison before summarizing
+    (e.g. '--filter IMM:OMM_dist>=20' to quantify only the cristae of the IMM). Filters
+    are ANDed; a range is two filters. They are merged with any config statistics.filters.
     """
+    from .surface_filters import parse_filters, describe
+
     config = load_config(configfile, require=("seg_dir", "work_dir", "segmentation_values"))
+    stats_cfg = config.get("statistics", {})
+    config_filters = stats_cfg.get("filters", []) if isinstance(stats_cfg, dict) else []
+    clauses = parse_filters(list(config_filters) + list(filters))
+    if clauses:
+        print(f"Triangle filter: {describe(clauses)}")
+
     labels, records = collect_feature(config, feature, split_components=split_components,
-                                      component_column=component_column)
+                                      component_column=component_column, filters=clauses)
     if not records:
         extra = (f" (with connected-component column '{component_column}')"
                  if split_components else "")
+        if clauses:
+            extra += f" surviving the filter [{describe(clauses)}]"
         raise click.ClickException(
             f"No surfaces in {config['work_dir']} have a '{feature}' column{extra}. "
             f"Check the feature name and that the pipeline has been run.")
@@ -222,9 +249,11 @@ def violin_cli(configfile, feature, statistic, bins, bin_range, test, split_comp
         out_svg += ".svg"
 
     # Tidy per-unit table alongside the figure, for downstream stats. `unit` is the
-    # plotted point (tomogram, or organelle when split); `tomogram` is its stratum.
+    # plotted point (tomogram, or organelle when split); `tomogram` is its stratum;
+    # `filter` records the active triangle filter (blank if none), for reproducibility.
+    filter_str = describe(clauses)
     rows = [{"unit": unit, "tomogram": stratum, "class": label, "feature": feature,
-             "statistic": statistic, "value": value}
+             "statistic": statistic, "filter": filter_str, "value": value}
             for label in used
             for unit, stratum, value in zip(units_by_label[label], strata_by_label[label],
                                             values_by_label[label])]
@@ -262,8 +291,11 @@ def violin_cli(configfile, feature, statistic, bins, bin_range, test, split_comp
             annotations = [(used.index(row["class_a"]), used.index(row["class_b"]),
                             row[star_key]) for row in test_rows]
 
+    title = f"{feature} by class ({stat_name})"
+    if clauses:
+        title += f"\nfiltered: {filter_str}"
     violin(datasets, used,
-           title=f"{feature} by class ({stat_name})",
+           title=title,
            ylabel=f"{feature} ({statistic})",
            filename=out_svg, figsize=tuple(figuresize), annotations=annotations)
     outputs = f"{out_svg}, {out_svg[:-3]}png, and {csv_path}"
