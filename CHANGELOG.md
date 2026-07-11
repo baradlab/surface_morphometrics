@@ -38,6 +38,14 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
   group, or a clear error). Metadata-aware selection via
   `dataset.surfaces(label="IMM", condition="Tg")`. Documented `statistics:` / `groups:`
   blocks in `config_template.yml`. `Experiment` stays importable for the pickle scripts.
+- `Dataset` parquet parse-cache (opt-in via `statistics.cache` or `Dataset(cache=...)`):
+  each surface's parsed table is cached to parquet keyed by the source CSV's path/mtime/
+  size, so a later run skips the CSV parse — ~4x faster warm reads on a 400k-triangle
+  surface (79 ms vs 309 ms), parquet ~2x smaller than the CSV. The key changes when a
+  surface is re-run, so a stale cache is never used, and stale entries are pruned. Cache
+  writes degrade gracefully to a warning if pyarrow is unavailable. `Dataset.to_pickle()`
+  / `to_experiment()` export a materialized `Experiment` for older pickle-based scripts
+  (documented as a convenience snapshot, not the cache, given the numpy-version caveat).
 - `surface_morphometrics.spatial_stats` — spatially-aware distribution comparison.
   Triangles are strongly autocorrelated, so a pooled two-sample test with n = n_triangles
   is wildly anticonservative (Type-I ~0.9 under H0 in simulation). Provides:

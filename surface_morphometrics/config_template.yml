@@ -108,6 +108,7 @@ mesh_refinement:
 #   exclude_tomograms: [UF3, TE1] # skip these tomograms (names/globs); exclude wins over include
 #   min_triangles: 0              # drop a surface/organelle left with fewer than this many triangles after filtering
 #   min_area: 0                   # drop a surface/organelle whose total post-filter area is below this
+#   cache: false                  # cache parsed surfaces to parquet for faster re-runs; true = .morphometrics_cache/ under work_dir, or a path (needs pyarrow)
 
 # TOMOGRAM GROUPS (metadata for treatment/morphology comparisons)
 # Maps each tomogram to a bucket per group, by name or glob, replacing hardcoded lists.

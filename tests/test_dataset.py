@@ -1,4 +1,7 @@
-"""Tests for the lazy, metadata-aware Dataset model (phase 3)."""
+"""Tests for the lazy, metadata-aware Dataset model (phase 3) and parquet cache (phase 4)."""
+import os
+from glob import glob
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -144,3 +147,89 @@ def test_surfaces_exists_only(tmp_path):
     assert [v.label for v in ds.surfaces()] == ["OMM"]
     labels = sorted(v.label for v in ds.surfaces(exists_only=False))
     assert labels == ["OMM"]                              # only OMM configured here
+
+
+# --- parquet parse-cache (phase 4) --------------------------------------------------
+
+pyarrow = pytest.importorskip("pyarrow")
+
+
+def test_resolve_cache_dir():
+    assert Dataset._resolve_cache_dir(False, "/w/") is None
+    assert Dataset._resolve_cache_dir(None, "/w/") is None
+    assert Dataset._resolve_cache_dir(True, "/w/") == "/w/.morphometrics_cache/"
+    assert Dataset._resolve_cache_dir("/tmp/c", "/w/") == "/tmp/c/"
+
+
+def test_from_config_enables_cache_from_statistics(tmp_path):
+    config = _make_run(tmp_path)
+    config["statistics"] = {"cache": True}
+    ds = Dataset.from_config(config)
+    assert ds.cache_dir == config["work_dir"] + ".morphometrics_cache/"
+
+
+def test_cache_writes_parquet_and_reads_it_back(tmp_path, monkeypatch):
+    config = _make_run(tmp_path)
+    cache_dir = str(tmp_path / "cache") + "/"
+    ds = Dataset.from_config(config, cache=cache_dir)
+    df = ds.load("TF1", "OMM")
+    parquets = glob(cache_dir + "TF1_OMM-*.parquet")
+    assert len(parquets) == 1                             # parse cached to parquet
+
+    # A fresh Dataset (empty in-memory cache) must read the parquet, not re-parse the CSV:
+    # make read_csv blow up so a cache miss would be obvious.
+    ds2 = Dataset.from_config(config, cache=cache_dir)
+    monkeypatch.setattr(pd, "read_csv", lambda *a, **k: pytest.fail("read_csv called on a cache hit"))
+    df2 = ds2.load("TF1", "OMM")
+    pd.testing.assert_frame_equal(df.reset_index(drop=True), df2.reset_index(drop=True))
+
+
+def test_cache_invalidates_when_source_changes(tmp_path):
+    config = _make_run(tmp_path)
+    cache_dir = str(tmp_path / "cache") + "/"
+    ds = Dataset.from_config(config, cache=cache_dir)
+    ds.load("TF1", "OMM")
+    first = glob(cache_dir + "TF1_OMM-*.parquet")[0]
+
+    # Rewrite the source with different content; the key (mtime/size) changes.
+    path = ds.surface_path("TF1", "OMM")
+    pd.DataFrame({"IMM_dist": np.arange(9.0), "area": np.ones(9)}).to_csv(path, index=False)
+    ds2 = Dataset.from_config(config, cache=cache_dir)
+    df = ds2.load("TF1", "OMM")
+    assert len(df) == 9                                   # re-parsed the new CSV
+    remaining = glob(cache_dir + "TF1_OMM-*.parquet")
+    assert len(remaining) == 1 and remaining[0] != first  # stale parquet pruned
+
+
+def test_cache_off_by_default(tmp_path):
+    config = _make_run(tmp_path)
+    ds = Dataset.from_config(config)
+    assert ds.cache_dir is None
+    ds.load("TF1", "OMM")
+    assert not glob(str(tmp_path / "**" / "*.parquet"), recursive=True)
+
+
+def test_cache_disables_gracefully_when_write_fails(tmp_path, monkeypatch, capsys):
+    config = _make_run(tmp_path)
+    ds = Dataset.from_config(config, cache=str(tmp_path / "cache") + "/")
+    monkeypatch.setattr(pd.DataFrame, "to_parquet",
+                        lambda *a, **k: (_ for _ in ()).throw(ImportError("no engine")))
+    df = ds.load("TF1", "OMM")                            # must still succeed from CSV
+    assert len(df) == 5 and ds._parquet_disabled
+    assert "parquet caching disabled" in capsys.readouterr().out
+
+
+def test_to_experiment_and_pickle_roundtrip(tmp_path):
+    config = _make_run(tmp_path, tomograms=("TF1", "TE1"))
+    ds = Dataset.from_config(config)
+    exp = ds.to_experiment(name="expt")
+    assert exp.name == "expt"
+    assert set(exp.tomograms) == {"TF1", "TE1"}
+    pd.testing.assert_frame_equal(exp["TF1"]["OMM"], ds.load("TF1", "OMM"))
+
+    import pickle
+    pkl = tmp_path / "expt.pkl"
+    ds.to_pickle(str(pkl))
+    with open(pkl, "rb") as handle:
+        loaded = pickle.load(handle)
+    assert set(loaded.tomograms) == {"TF1", "TE1"}
