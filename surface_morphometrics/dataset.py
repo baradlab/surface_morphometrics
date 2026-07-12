@@ -41,6 +41,7 @@ import hashlib
 import os
 from glob import glob
 
+import numpy as np
 import pandas as pd
 
 from .surface_selection import _matches_any, select_tomograms
@@ -156,7 +157,7 @@ class Dataset:
     """A lazy index of a morphometrics run's surfaces, with per-tomogram metadata."""
 
     def __init__(self, work_dir, labels, tomograms, radius_hit=9, groups=None, name=None,
-                 cache_dir=None):
+                 cache_dir=None, excluded_tomograms=None):
         """Build an index. Prefer :meth:`from_config`.
 
         Args:
@@ -176,6 +177,7 @@ class Dataset:
         self.extension = f".AVV_rh{radius_hit}.csv"
         self.name = name
         self.groups = groups or {}
+        self.excluded_tomograms = list(excluded_tomograms or [])
         self._metadata = assign_groups(self.tomogram_names, self.groups)
         self._cache = {}
         self.cache_dir = cache_dir
@@ -202,14 +204,15 @@ class Dataset:
         stats_cfg = config.get("statistics", {}) or {}
         if not isinstance(stats_cfg, dict):
             stats_cfg = {}
-        used, _excluded = select_tomograms(
+        used, excluded = select_tomograms(
             all_tomograms, stats_cfg.get("include_tomograms"),
             stats_cfg.get("exclude_tomograms"))
         if cache is None:
             cache = stats_cfg.get("cache", False)
         cache_dir = cls._resolve_cache_dir(cache, work_dir)
         return cls(work_dir, labels, used, radius_hit=radius_hit,
-                   groups=config.get("groups") or {}, name=name, cache_dir=cache_dir)
+                   groups=config.get("groups") or {}, name=name, cache_dir=cache_dir,
+                   excluded_tomograms=excluded)
 
     @staticmethod
     def _resolve_cache_dir(cache, work_dir):
@@ -351,6 +354,65 @@ class Dataset:
                 if exists_only and not view.exists():
                     continue
                 yield view
+
+    def collect_feature(self, feature, split_components=False,
+                        component_column="component_number", filters=None,
+                        min_triangles=0, min_area=0.0):
+        """Per-unit (values, areas) arrays for `feature`, with filtering and size selection.
+
+        Returns `(records, diagnostics)`. `records` is a list of
+        `(label, unit, stratum, values, areas)`: `unit` is the data point (a tomogram, or
+        `tomogram#cN` when `split_components`), `stratum` is the tomogram it came from (for
+        nested tests / ICC). Non-finite and zero-area triangles are dropped; `filters`
+        (parsed clauses from `surface_filters`) further restrict triangles per class; a
+        unit left below `min_triangles` / `min_area` is dropped and counted.
+
+        This is the shared collection the `violin`, `compare`, permutation, and cluster-CI
+        tools consume -- surfaces load through the parquet cache, and the tomogram set has
+        already been narrowed by the include/exclude selection.
+        """
+        from .surface_filters import filter_mask
+        from .surface_selection import passes_size
+
+        dropped_units = 0
+        records = []
+
+        def _emit(label, unit, stratum, values, areas, keep):
+            nonlocal dropped_units
+            if not keep.any():
+                return
+            if not passes_size(int(keep.sum()), float(areas[keep].sum()),
+                               min_triangles, min_area):
+                dropped_units += 1
+                return
+            records.append((label, unit, stratum, values[keep], areas[keep]))
+
+        for label in self.labels:
+            for tomo in self.tomogram_names:
+                if not self.surface(tomo, label).exists():
+                    continue
+                df = self.load(tomo, label)
+                if feature not in df.columns or "area" not in df.columns:
+                    continue
+                values = df[feature].to_numpy(dtype=float)
+                areas = df["area"].to_numpy(dtype=float)
+                finite = np.isfinite(values) & np.isfinite(areas) & (areas > 0)
+                if filters:
+                    finite = finite & filter_mask(df, filters, label)
+                if split_components:
+                    if component_column not in df.columns:
+                        continue
+                    comp = df[component_column].to_numpy()
+                    for cid in np.unique(comp[comp > 0]):
+                        _emit(label, f"{tomo}#c{int(cid)}", tomo, values, areas,
+                              finite & (comp == cid))
+                else:
+                    _emit(label, tomo, tomo, values, areas, finite)
+
+        diagnostics = {"used_tomograms": list(self.tomogram_names),
+                       "excluded_tomograms": list(self.excluded_tomograms),
+                       "dropped_units": dropped_units}
+        return records, diagnostics
 
     def __repr__(self):
         return (f"Dataset(name={self.name!r}, {len(self.tomogram_names)} tomogram(s), "

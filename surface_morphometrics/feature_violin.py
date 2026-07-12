@@ -87,56 +87,31 @@ def collect_feature(config, feature, split_components=False,
     `diagnostics` is a dict: `used_tomograms` / `excluded_tomograms` (by the include/
     exclude lists) and `dropped_units` (surviving-but-too-small units removed by the size
     thresholds).
+
+    Collection is delegated to a groupless `dataset.Dataset` so the same filtering,
+    selection, and parquet parse-cache back the violin and compare commands alike.
     """
-    from .surface_filters import filter_mask
-    from .surface_selection import select_tomograms, passes_size
+    from .dataset import Dataset
+    from .surface_selection import select_tomograms
 
     work_dir = config["work_dir"]
     radius_hit = config.get("curvature_measurements", {}).get("radius_hit", 9)
-    extension = f".AVV_rh{radius_hit}.csv"
     labels = list(config["segmentation_values"].keys())
     all_tomograms = sorted(os.path.basename(f)[:-4] for f in glob(config["seg_dir"] + "*.mrc"))
     tomograms, excluded = select_tomograms(all_tomograms, include_tomograms, exclude_tomograms)
 
-    dropped_units = 0
+    stats_cfg = config.get("statistics", {}) or {}
+    if not isinstance(stats_cfg, dict):
+        stats_cfg = {}
+    cache_dir = Dataset._resolve_cache_dir(stats_cfg.get("cache", False), work_dir)
 
-    def _emit(records, label, unit, stratum, values, areas, keep):
-        """Append a unit's surviving triangles unless it falls below the size thresholds."""
-        nonlocal dropped_units
-        if not keep.any():
-            return
-        if not passes_size(int(keep.sum()), float(areas[keep].sum()), min_triangles, min_area):
-            dropped_units += 1
-            return
-        records.append((label, unit, stratum, values[keep], areas[keep]))
-
-    records = []
-    for label in labels:
-        for tomo in tomograms:
-            path = f"{work_dir}{tomo}_{label}{extension}"
-            if not os.path.isfile(path):
-                continue
-            df = pd.read_csv(path)
-            if feature not in df.columns or "area" not in df.columns:
-                continue
-            values = df[feature].to_numpy(dtype=float)
-            areas = df["area"].to_numpy(dtype=float)
-            finite = np.isfinite(values) & np.isfinite(areas) & (areas > 0)
-            if filters:
-                finite = finite & filter_mask(df, filters, label)
-
-            if split_components:
-                if component_column not in df.columns:
-                    continue
-                comp = df[component_column].to_numpy()
-                for cid in np.unique(comp[comp > 0]):
-                    _emit(records, label, f"{tomo}#c{int(cid)}", tomo, values, areas,
-                          finite & (comp == cid))
-            else:
-                _emit(records, label, tomo, tomo, values, areas, finite)
-
-    diagnostics = {"used_tomograms": tomograms, "excluded_tomograms": excluded,
-                   "dropped_units": dropped_units}
+    # groups={} on purpose: violin never uses tomogram metadata, so it must not fail on a
+    # `groups:` block that happens to be present (and possibly mislabeled) in the config.
+    ds = Dataset(work_dir, labels, tomograms, radius_hit=radius_hit, groups={},
+                 cache_dir=cache_dir, excluded_tomograms=excluded)
+    records, diagnostics = ds.collect_feature(
+        feature, split_components=split_components, component_column=component_column,
+        filters=filters, min_triangles=min_triangles, min_area=min_area)
     return labels, records, diagnostics
 
 

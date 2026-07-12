@@ -11,6 +11,18 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
 (not the triangle) as the unit of replication.
 
 ### Added
+- `morphometrics compare config.yml -n F -g GROUP` — a spatially-aware treatment
+  comparison of one feature between the two conditions of a config `groups:` block, per
+  membrane class. Effect size is an area-weighted KS (or `--statistic wasserstein`)
+  between the pooled condition distributions; the p-value comes from a permutation test
+  that treats the tomogram as the unit of replication (flat, or nested at the tomogram
+  level with `--split-components`), and reports the permutation floor; per-condition means
+  come with `cluster_t_interval` CIs. Composes with `--filter` (e.g. compare cristae).
+  Writes `<feature>_<group>_compare.csv`. New docs: `docs/dataset.md`.
+- `dataset.Dataset.collect_feature` — the shared per-unit `(values, areas)` collection now
+  backing both `violin` and `compare`, so filtering, selection, and the parquet cache are
+  consistent across commands (the `violin` command now reads through it and gains the
+  cache). Directly consumable by `spatial_stats` for bespoke comparisons.
 - `morphometrics violin config.yml --feature F` — one violin per membrane class, one
   point per tomogram, from an area-weighted mean / median / histogram-peak (mode) of
   the feature per surface. Classes lacking the feature are skipped. `--test {mwu,ttest}`

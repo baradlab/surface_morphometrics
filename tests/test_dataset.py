@@ -219,6 +219,21 @@ def test_cache_disables_gracefully_when_write_fails(tmp_path, monkeypatch, capsy
     assert "parquet caching disabled" in capsys.readouterr().out
 
 
+def test_collect_feature_engine(tmp_path):
+    config = _make_run(tmp_path, tomograms=("TF1", "TE1"))
+    config["groups"] = {"condition": {"Tg": ["?F*"], "Vehicle": ["?E*"]}}
+    ds = Dataset.from_config(config)
+    records, diag = ds.collect_feature("IMM_dist")
+    # 2 classes x 2 tomograms, each with 5 finite triangles
+    assert len(records) == 4
+    assert diag["dropped_units"] == 0 and sorted(diag["used_tomograms"]) == ["TE1", "TF1"]
+    for _label, unit, stratum, values, areas in records:
+        assert unit == stratum and len(values) == 5 and len(areas) == 5
+    # size threshold drops everything (each unit has 5 triangles)
+    _records, diag2 = ds.collect_feature("IMM_dist", min_triangles=10)
+    assert _records == [] and diag2["dropped_units"] == 4
+
+
 def test_to_experiment_and_pickle_roundtrip(tmp_path):
     config = _make_run(tmp_path, tomograms=("TF1", "TE1"))
     ds = Dataset.from_config(config)

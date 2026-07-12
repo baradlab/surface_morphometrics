@@ -258,9 +258,11 @@ practical gain, and is deliberately deferred.
   non-Gaussian check before it is trusted for a smooth, skewed feature.
 - **ℓ for smooth features is genuinely not identifiable** from a single surface (no scale
   separation). This is a property of the data, not a bug; use the permutation test.
-- **`spatial_stats` is a tested library, not yet a CLI command.** A
-  `morphometrics compare` command wrapping `permutation_test` (with the flat/nested/ICC
-  choice and a Wasserstein effect size) is the natural next step.
+- **`morphometrics compare`** wraps `permutation_test` (with the flat/nested choice and a
+  KS or Wasserstein effect size) plus `cluster_t_interval`, driven by the config `groups:`
+  metadata — see [dataset.md](dataset.md#morphometrics-compare-a-spatially-aware-treatment-comparison).
+  For designs it does not express, call `spatial_stats` directly on
+  `Dataset.collect_feature` output.
 - **`ks_statistics` still uses one `rad` for all features.** Per-feature ℓ (from
   `estimate_neff` where identifiable) would fix the anticonservatism for smooth distance
   fields; until then, do not quote `prad` for a smooth feature.

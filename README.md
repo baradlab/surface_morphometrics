@@ -13,6 +13,8 @@ Everything is driven by a single `morphometrics` command plus a `config.yml` fil
 
 📊 **[Statistics & Visualization](docs/statistics.md)** — how the distribution-comparison tools are organized and why (unit of replication, permutation tests, effective-N, plots).
 
+🗂️ **[Datasets, filtering & grouped comparisons](docs/dataset.md)** — filter triangles (e.g. cristae), select and group tomograms, run `morphometrics compare`, and drive the stats tools from the `Dataset` API.
+
 ## Contents
 - [Installation](#installation)
 - [Quick start](#quick-start)
