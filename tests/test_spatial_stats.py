@@ -111,6 +111,33 @@ def test_permutation_reproducible_and_floor():
     assert r1["min_possible_p"] == pytest.approx(2.0 / 20)   # 2 / C(6,3)
 
 
+def test_permutation_grid_statistic_matches_the_exact_one():
+    # permutation_test scores replicates from per-unit ECDFs on a shared grid (so a
+    # replicate is a mixture, not a re-sort of millions of triangles). The resulting
+    # statistic must still agree with the exact pooled statistic.
+    rng = np.random.default_rng(11)
+    A = [rng.normal(0.0, 1.0, 20000) for _ in range(4)]
+    B = [rng.normal(0.4, 1.0, 20000) for _ in range(4)]
+    conds = ["a"] * 4 + ["b"] * 4
+
+    ks = ss.permutation_test(A + B, conds, reps=20)
+    exact_ks = ss.weighted_ks_statistic(np.concatenate(A), np.concatenate(B))
+    assert ks["observed"] == pytest.approx(exact_ks, abs=1e-3)
+
+    w1 = ss.permutation_test(A + B, conds, statistic="wasserstein", reps=20)
+    exact_w1 = ss.weighted_wasserstein(np.concatenate(A), np.concatenate(B))
+    assert w1["observed"] == pytest.approx(exact_w1, rel=1e-2)
+
+
+def test_permutation_grid_is_exact_for_small_data():
+    # When every distinct value fits in the grid, the statistic is exact, not approximate.
+    a = [np.array([1.0, 2.0, 3.0]), np.array([1.5, 2.5, 3.5])]
+    b = [np.array([5.0, 6.0, 7.0]), np.array([5.5, 6.5, 7.5])]
+    res = ss.permutation_test(a + b, ["a", "a", "b", "b"], reps=10)
+    assert res["observed"] == pytest.approx(
+        ss.weighted_ks_statistic(np.concatenate(a), np.concatenate(b)))
+
+
 def test_permutation_wasserstein_and_validation():
     rng = np.random.default_rng(4)
     A = _units(rng, [0, 0, 0])
