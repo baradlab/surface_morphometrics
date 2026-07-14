@@ -59,6 +59,22 @@ def _surface_cache_key(path):
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
 
+def _default_bucket(group_name, buckets):
+    """The group's fallback bucket ("everything else"), i.e. the one with no patterns.
+
+    A bucket whose pattern list is empty/null catches every tomogram no explicit bucket
+    claimed -- e.g. `{Positive: [tomo1, tomo2], Negative: []}` means "the listed tomograms
+    are Positive, all the rest are Negative", so only the interesting set is enumerated.
+    At most one default per group.
+    """
+    defaults = [label for label, patterns in buckets.items() if not patterns]
+    if len(defaults) > 1:
+        raise ValueError(
+            f"group '{group_name}' has more than one default (pattern-less) bucket: "
+            f"{', '.join(defaults)}. At most one bucket may be the catch-all.")
+    return defaults[0] if defaults else None
+
+
 def assign_groups(tomograms, groups):
     """Map each tomogram to its bucket in every group, validating the assignment.
 
@@ -66,16 +82,23 @@ def assign_groups(tomograms, groups):
     `{tomogram: {group_name: bucket_label}}`. Raises ValueError listing every problem if
     any tomogram matches zero buckets (unassigned) or more than one bucket (ambiguous) in
     a group -- so a mislabeled tomogram is a load-time error, not a silent mistake.
+
+    A bucket with an empty pattern list is the group's **default** ("everything else"):
+    tomograms no other bucket claimed land there instead of being unassigned. See
+    :func:`_default_bucket`.
     """
     assignment = {}
     problems = []
+    defaults = {name: _default_bucket(name, buckets) for name, buckets in groups.items()}
     for tomo in tomograms:
         meta = {}
         for group_name, buckets in groups.items():
             matched = [label for label, patterns in buckets.items()
-                       if _matches_any(tomo, patterns or [])]
+                       if patterns and _matches_any(tomo, patterns)]
             if len(matched) == 1:
                 meta[group_name] = matched[0]
+            elif not matched and defaults[group_name] is not None:
+                meta[group_name] = defaults[group_name]
             elif not matched:
                 problems.append(
                     f"  {tomo}: no bucket in group '{group_name}' "
@@ -88,8 +111,8 @@ def assign_groups(tomograms, groups):
     if problems:
         raise ValueError(
             "config `groups:` does not assign every tomogram to exactly one bucket per "
-            "group. Fix the patterns, or exclude these tomograms via "
-            "statistics.exclude_tomograms:\n" + "\n".join(problems))
+            "group. Fix the patterns, add a default (pattern-less) bucket, or exclude "
+            "these tomograms via statistics.exclude_tomograms:\n" + "\n".join(problems))
     return assignment
 
 
@@ -106,7 +129,7 @@ class SurfaceView:
         return self.dataset.surface_path(self.tomo, self.label)
 
     def exists(self):
-        return os.path.isfile(self.path)
+        return self.dataset.exists(self.tomo, self.label)
 
     def load(self):
         """The per-triangle dataframe (read once, then cached on the dataset)."""
@@ -231,6 +254,10 @@ class Dataset:
 
     def surface(self, tomo, label):
         return SurfaceView(self, tomo, label)
+
+    def exists(self, tomo, label):
+        """Whether a surface is available. Override with `load` for a non-CSV backend."""
+        return os.path.isfile(self.surface_path(tomo, label))
 
     def load(self, tomo, label):
         """Read (and cache) a surface's per-triangle dataframe.

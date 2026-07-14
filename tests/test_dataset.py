@@ -52,6 +52,21 @@ def test_assign_groups_empty_is_noop():
     assert assign_groups(["TF1", "TE1"], {}) == {"TF1": {}, "TE1": {}}
 
 
+def test_assign_groups_default_bucket_catches_the_rest():
+    # "these named tomograms are Positive, everything else is Negative"
+    groups = {"drp1": {"Positive": ["TF1", "TF2"], "Negative": []}}
+    meta = assign_groups(["TF1", "TF2", "TE1", "UF3"], groups)
+    assert meta["TF1"] == {"drp1": "Positive"}
+    assert meta["TE1"] == {"drp1": "Negative"}
+    assert meta["UF3"] == {"drp1": "Negative"}
+
+
+def test_assign_groups_rejects_two_default_buckets():
+    groups = {"drp1": {"Positive": [], "Negative": []}}
+    with pytest.raises(ValueError, match="more than one default"):
+        assign_groups(["TF1"], groups)
+
+
 # --- construction / selection from config -------------------------------------------
 
 def test_from_config_discovers_tomograms(tmp_path):
