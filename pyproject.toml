@@ -54,6 +54,11 @@ test = ["pytest"]
 # PyPI, install it from git:
 gui = ["surface-morphometrics-gui @ git+https://github.com/baradlab/surface-morphometrics-gui.git"]
 # gui = ["surface-morphometrics-gui"]  # use this once the GUI is on PyPI
+# GPU curvature backend (pycurv-gpu). Adds `morphometrics pycurv_gpu` via the
+# same entry-point group. Needs a CUDA-capable PyTorch build in this env
+# (install torch first from https://pytorch.org if pip's default is wrong).
+gpu = ["pycurv-gpu @ git+https://github.com/hemanthkapa/pycurv-gpu.git"]
+# gpu = ["pycurv-gpu"]  # use this once pycurv-gpu is on PyPI
 
 [project.scripts]
 morphometrics = "surface_morphometrics.cli:main"

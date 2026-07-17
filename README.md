@@ -38,6 +38,23 @@ The fastest, easiest starting point for most Linux boxes, and now for Mac as wel
 
 > If you pull updates into an existing clone and the `morphometrics` command seems out of date, re-run `pip install -e .` from the repo root inside the activated environment.
 
+### Optional extras
+
+Same pattern as the napari GUI — install into the morphometrics env to register extra `morphometrics` subcommands:
+
+```bash
+pip install -e ".[gui]"   # adds: morphometrics gui
+pip install -e ".[gpu]"   # adds: morphometrics pycurv_gpu  (needs CUDA torch)
+```
+
+Then use GPU curvature in place of the CPU step:
+
+```bash
+morphometrics pycurv_gpu config.yml mesh.surface.vtp
+```
+
+Existing morphometrics installs: `pip install -e ".[gpu]"` from a current clone (or `pip install "surface-morphometrics[gpu] @ git+https://github.com/grotjahnlab/surface_morphometrics.git"` if you are not developing from source).
+
 ### Option 2: Docker
 Useful on Windows and other systems where graph-tool or pymeshlab do not play nicely with conda. The image ships with all dependencies pre-installed.
 ```bash
