@@ -44,6 +44,46 @@ def test_write_obj_mtl_nan_swatch():
     assert abs(u[1] - (eo._RAMP_W + eo._NAN_W / 2.0) / (eo._RAMP_W + eo._NAN_W)) < 1e-6
 
 
+def test_coordinate_scale_units():
+    # nm surface: default Angstrom output, or nm passthrough
+    assert eo.coordinate_scale(False, scale_to_angstroms=True) == 10.0
+    assert eo.coordinate_scale(False, scale_to_angstroms=False) == 1.0
+    # Angstrom surface: passthrough, or back to nm
+    assert eo.coordinate_scale(True, scale_to_angstroms=True) == 1.0
+    assert eo.coordinate_scale(True, scale_to_angstroms=False) == 0.1
+
+
+def test_coordinate_scale_voxels():
+    # 5 A/px: an nm-scale surface doubles, an Angstrom-scale one is divided by 5
+    assert eo.coordinate_scale(False, scale_to_voxels=5.0) == 2.0
+    assert eo.coordinate_scale(True, scale_to_voxels=5.0) == 0.2
+    # voxel space wins regardless of the (defaulted) Angstrom flag
+    assert eo.coordinate_scale(False, scale_to_angstroms=True, scale_to_voxels=10.0) == 1.0
+
+
+def test_coordinate_scale_rejects_nonpositive_voxel_size():
+    import click
+    import pytest
+    with pytest.raises(click.UsageError):
+        eo.coordinate_scale(False, scale_to_voxels=0.0)
+    with pytest.raises(click.UsageError):
+        eo.coordinate_scale(False, scale_to_voxels=-5.0)
+
+
+def test_scale_to_voxels_conflicts_with_scale_to_angstroms():
+    from click.testing import CliRunner
+    with tempfile.TemporaryDirectory() as d:
+        cfg = os.path.join(d, "config.yml")
+        with open(cfg, "w") as f:
+            f.write(f"work_dir: {d}\n")
+        result = CliRunner().invoke(
+            eo.export_obj_cli,
+            [cfg, "--feature", "thickness", "--scale_to_voxels", "5.0",
+             "--scale_to_angstroms", "true"])
+        assert result.exit_code != 0
+        assert "mutually exclusive" in result.output
+
+
 def test_write_obj_mtl_nan_disabled():
     import matplotlib.image as mpimg
     pts, faces = _mesh()
