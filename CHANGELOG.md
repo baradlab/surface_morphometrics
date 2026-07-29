@@ -4,7 +4,7 @@ All notable changes to the Surface Morphometrics toolkit are documented here.
 This project loosely follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
-## [2.0.0b5] — beta
+## [2.0.0b6] — beta
 
 Statistics and plotting: a cross-tomogram violin command, a unified pairwise
 significance tester, and spatially-aware comparison tools that treat the tomogram
@@ -250,7 +250,7 @@ how the toolkit is invoked.
 - README reorganized (Installation / Quick start / Pipeline / Analysis &
   visualization / Reference / Upgrading) with a table of contents.
 
-[2.0.0b5]: https://github.com/baradlab/surface_morphometrics/releases
+[2.0.0b6]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b4]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b3]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b2]: https://github.com/baradlab/surface_morphometrics/releases

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "surface-morphometrics"
-version = "2.0.0b5"
+version = "2.0.0b6"
 description = "Quantification of membrane surfaces segmented from cryo-ET or other volumetric imaging."
 readme = "README.md"
 requires-python = ">=3.11"
