@@ -17,6 +17,7 @@ Usage:
   morphometrics export_obj config.yml surface.AVV_rh9.vtp --feature curvedness_VV
   morphometrics export_obj config.yml surface.vtp --list-features
   morphometrics export_obj config.yml --feature thickness          # batch over work_dir
+  morphometrics export_obj config.yml surface.vtp --feature thickness --scale_to_voxels 5.0
 """
 
 __author__ = "Benjamin Barad"
@@ -29,6 +30,7 @@ from glob import glob
 import click
 import numpy as np
 import yaml
+from click.core import ParameterSource
 
 from .config_utils import load_config
 
@@ -210,6 +212,26 @@ def write_obj_mtl(out_base, points, faces, values, feature, cmap="viridis",
     return vmin, vmax
 
 
+def coordinate_scale(source_angstroms, scale_to_angstroms=True, scale_to_voxels=None):
+    """Factor converting the surface's native coordinates to the requested output units.
+
+    `source_angstroms` is the surface's native unit (config surface_generation.angstroms:
+    True for Angstroms, False for nm). With `scale_to_voxels` (a voxel size in A/px) the
+    output is in voxel/pixel space; otherwise output is Angstroms or nm per
+    `scale_to_angstroms`. Nothing is ever double-converted.
+    """
+    if scale_to_voxels is not None:
+        if scale_to_voxels <= 0:
+            raise click.UsageError("--scale_to_voxels must be a positive voxel size in Angstroms/px.")
+        # native -> Angstroms -> voxels
+        return (1.0 if source_angstroms else 10.0) / scale_to_voxels
+    if scale_to_angstroms and not source_angstroms:
+        return 10.0    # surface in nm -> Angstrom output
+    if not scale_to_angstroms and source_angstroms:
+        return 0.1     # surface in Angstrom -> nm output
+    return 1.0         # already in the requested units
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -237,12 +259,24 @@ def write_obj_mtl(out_base, points, faces, values, feature, cmap="viridis",
                    "ChimeraX and Blender molecular nodes work in Angstrom space). The "
                    "surface's native units are read from surface_generation.angstroms and "
                    "coordinates are converted only as needed. Pass false to output in nm.")
-def export_obj_cli(configfile, vtp, feature, cmap, vmin, vmax, nan_color, pattern, output_dir, list_features, scale_to_angstroms):
+@click.option("--scale_to_voxels", "scale_to_voxels", type=float, default=None,
+              metavar="ANGSTROMS_PER_PIXEL",
+              help="Output coordinates in voxel (pixel) space instead, given the tomogram's "
+                   "voxel size in Angstroms/px (e.g. 5.0 doubles an nm-scale surface and "
+                   "divides an Angstrom-scale one by 5). Mutually exclusive with "
+                   "--scale_to_angstroms.")
+@click.pass_context
+def export_obj_cli(ctx, configfile, vtp, feature, cmap, vmin, vmax, nan_color, pattern, output_dir,
+                   list_features, scale_to_angstroms, scale_to_voxels):
     """Export quantified surface(s) to colormapped OBJ + MTL for visualization.
 
     CONFIGFILE: path to config.yml.
     VTP: a surface .vtp to export; if omitted, all matching surfaces in work_dir.
     """
+    if scale_to_voxels is not None and ctx.get_parameter_source("scale_to_angstroms") is not ParameterSource.DEFAULT:
+        raise click.UsageError("--scale_to_voxels and --scale_to_angstroms are mutually exclusive; "
+                               "--scale_to_voxels already puts the output in voxel space.")
+
     config = load_config(configfile, require=("work_dir",))
     work_dir = config.get("work_dir", config.get("seg_dir", "./"))
     if not work_dir.endswith("/"):
@@ -252,12 +286,7 @@ def export_obj_cli(configfile, vtp, feature, cmap, vmin, vmax, nan_color, patter
     # Decide the coordinate scale factor from the surface's native units (config)
     # and the requested output units, so we never double-convert.
     source_angstroms = config.get("surface_generation", {}).get("angstroms", False)
-    if scale_to_angstroms and not source_angstroms:
-        coord_scale = 10.0    # surface in nm -> Angstrom output
-    elif not scale_to_angstroms and source_angstroms:
-        coord_scale = 0.1     # surface in Angstrom -> nm output
-    else:
-        coord_scale = 1.0     # already in the requested units
+    coord_scale = coordinate_scale(source_angstroms, scale_to_angstroms, scale_to_voxels)
 
     # --list-features inspects one VTP and exits.
     if list_features:

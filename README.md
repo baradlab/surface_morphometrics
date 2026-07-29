@@ -220,6 +220,7 @@ morphometrics export_obj config.yml --feature thickness --cmap magma            
 - Range defaults to the 2nd–98th percentile (`--vmin/--vmax`), any matplotlib `--cmap`; works on any per-triangle (or per-vertex, averaged) array.
 - NaN/unmeasured triangles get a distinct swatch (`--nan-color`, default `lightgrey`; `--nan-color none` maps them to the low end instead).
 - Output coordinates are in Angstroms by default, since downstream tools that consume the OBJ (ChimeraX, Blender molecular nodes, etc.) work in Å space. The surface's native units are read from `surface_generation.angstroms` and converted only as needed. Pass `--scale_to_angstroms false` to export in nanometres.
+- To overlay the mesh on the tomogram itself, `--scale_to_voxels 5.0` exports in voxel (pixel) space for a 5 Å/px tomogram — an nm-scale surface is doubled, an Å-scale one divided by 5. Mutually exclusive with `--scale_to_angstroms`.
 - Vector properties are colorable by component (e.g. `--feature n_v_x`, `--feature OMM_dist`).
 - In Blender, import the OBJ (MTL/PNG are picked up automatically) and switch to Material Preview/Rendered shading.
 

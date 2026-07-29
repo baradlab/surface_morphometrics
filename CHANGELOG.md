@@ -4,6 +4,17 @@ All notable changes to the Surface Morphometrics toolkit are documented here.
 This project loosely follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [2.0.0b5] — beta
+
+Voxel-space OBJ export.
+
+### Added
+- `export_obj --scale_to_voxels A_PER_PX` — export the mesh in voxel (pixel) space for
+  overlaying on the tomogram, given the tomogram's voxel size in Å/px. The surface's
+  native units are read from `surface_generation.angstroms`, so at 5 Å/px an nm-scale
+  surface is doubled and an Å-scale one divided by 5. Mutually exclusive with
+  `--scale_to_angstroms`.
+
 ## [2.0.0b4] — beta
 
 Protein-patch workflow overhaul and a mesh-refinement pycurv speed fix.
@@ -163,6 +174,7 @@ how the toolkit is invoked.
 - README reorganized (Installation / Quick start / Pipeline / Analysis &
   visualization / Reference / Upgrading) with a table of contents.
 
+[2.0.0b5]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b4]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b3]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b2]: https://github.com/baradlab/surface_morphometrics/releases
