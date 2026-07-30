@@ -18,8 +18,16 @@ standalone importable library.
   it runs in CI: it pins that every `surface_generation` setting reaches the meshing
   subprocess carrying its configured value, and that every documented setting has a
   consumer — the two guards that would have caught the inert `ultrafine` below.
+- `tests/test_version.py` pins `surface_morphometrics.__version__` to `pyproject.toml`'s
+  `version`. The two had drifted apart twice (fixed in 2.0.0b3, drifted again at
+  2.0.0b5) because a release bumps one and forgets the other.
 
 ### Changed
+- `vtk` is now a declared dependency in `pyproject.toml` (`vtk>=9`). It was always
+  required — `ply2vtp`, `export_obj`, and `refine_mesh` all use it — but was only ever
+  installed as a side effect of the conda environment, so a plain `pip install` produced
+  a package that failed at runtime. It is pip-resolvable, so it belongs with the pip
+  dependencies rather than with the conda-only ones.
 - Mesh generation no longer depends on pycurv. `ply2vtp` imported `pycurv_io` and
   `scipy.ndimage.morphology.distance_transform_edt` without ever referencing either;
   the pycurv import was the only thing coupling the segmentation → mesh path to

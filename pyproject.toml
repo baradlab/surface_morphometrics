@@ -38,6 +38,10 @@ dependencies = [
     "ruamel.yaml",
     "click",
     "mrcfile",
+    # Mesh IO/geometry: imported lazily (inside functions) by ply2vtp, export_obj,
+    # refine_mesh and others, so it is pip-resolvable and belongs here rather than
+    # with the conda-only packages above.
+    "vtk>=9",
     "starfile",
     "tqdm",
 ]
