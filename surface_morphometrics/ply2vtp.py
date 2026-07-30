@@ -8,14 +8,9 @@ __email__ = "benjamin.barad@gmail.com"
 __license__ = "GPLv3"
 
 import gc
-import glob
-import os
 
 import click
-import numpy as np
-from pycurv import pycurv_io as io
-from scipy.ndimage.morphology import distance_transform_edt
-import vtk
+
 
 @click.command()
 @click.argument('input_ply', type=str)
@@ -26,7 +21,10 @@ def convert_from_CLI(input_ply, output_vtp):
 
 def ply_to_vtp(plyfilename, vtpfilename):
     """Convert an input ply file to a vtp file"""
-    print("open")
+    # vtk is imported here, not at module scope, so that importing this module
+    # (and segmentation_to_meshes, which orchestrates it) does not require vtk.
+    import vtk
+
     plyfile = vtk.vtkPLYReader()
     plyfile.SetFileName(plyfilename)
     plyfile.Update()
@@ -36,8 +34,7 @@ def ply_to_vtp(plyfilename, vtpfilename):
     writer.SetFileName(fname)
     writer.SetInputData(surf)
     if writer.Write() != 1:
-        raise pexceptions.PySegInputError(
-            expr='save_vtp', msg='Error writing the file {}.'.format(fname))
+        raise RuntimeError(f"Error writing the vtp file {fname}.")
     gc.collect()
 
 

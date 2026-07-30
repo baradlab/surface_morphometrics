@@ -7,24 +7,17 @@ __author__ = "Benjamin Barad"
 __email__ = "benjamin.barad@gmail.com"
 __license__ = "GPLv3"
 
-from sys import argv
-import importlib_metadata as metadata
-import glob
 import math
-import pymeshlab as pm
-import click
 
-# Ensure compatibility with pymeshlab 2022.2.post3
-PML_VER = metadata.version('pymeshlab')
-if PML_VER == '2022.2.post3':
-    pm.PercentageValue = pm.Percentage
+import click
+import pymeshlab as pm
+
 
 @click.command()
 @click.argument('xyzfile', type=str)
 @click.argument('plyfile', type=str)
 @click.option('--pointweight', type=float, default=1)
 @click.option('--simplify', type=bool, default=False)
-@click.option('--ultrafine', type=bool, default=False)
 @click.option('--num_faces', type=int, default=300000)
 @click.option('--k_neighbors', type=int, default=40)
 @click.option('--deldist', type=float, default=1)
@@ -32,18 +25,17 @@ if PML_VER == '2022.2.post3':
 @click.option('--depth', type=int, default=9)
 @click.option('--isotropic_remesh', type=bool, default=True)
 @click.option('--target_area', type=float, default=1.0)
-def xyz_to_ply_from_CLI(xyzfile, plyfile, pointweight, ultrafine, simplify, num_faces, k_neighbors, deldist, smooth_iter, depth, isotropic_remesh, target_area):
+def xyz_to_ply_from_CLI(xyzfile, plyfile, pointweight, simplify, num_faces, k_neighbors, deldist, smooth_iter, depth, isotropic_remesh, target_area):
     """Click wrapper for xyz_to_ply"""
     xyz_to_ply(xyzfile, plyfile, pointweight=pointweight, simplify=simplify, num_faces=num_faces, k_neighbors=k_neighbors, deldist=deldist, smooth_iter=smooth_iter, depth=depth, isotropic_remesh=isotropic_remesh, target_area=target_area)
 
 
-def xyz_to_ply(xyzfile, plyfile, pointweight=0.1, simplify=False, num_faces=150000, k_neighbors=500, deldist=1.5, smooth_iter=1, depth=9, ultrafine=False, isotropic_remesh=True, target_area=1.0):
+def xyz_to_ply(xyzfile, plyfile, pointweight=0.1, simplify=False, num_faces=150000, k_neighbors=500, deldist=1.5, smooth_iter=1, depth=9, isotropic_remesh=True, target_area=1.0):
     """Convert an xyz file to a ply file using pymeshlab
 
     Arguments:
     xyzfile {str} -- Input xyz filename
     plyfile {str} -- Output ply filename
-    ultrafine {bool} -- If True, uses an additional subdivision and resampling routine before cropping. Not necessary under normal conditions but may help with unusually challenging membranes. Default False.
     simplify {bool} -- If True, will simplify the mesh to a set number of faces. Default False.
     num_faces {int} -- Maximal number of allowed faces after decimation. Default 150000, use more for finer sampling but with greater computational cost.
     depth {int} -- Depth of screened poisson octree. Higher numbers mean more complex meshes but can incorporate stepping artifacts. Default 9.
@@ -65,13 +57,7 @@ def xyz_to_ply(xyzfile, plyfile, pointweight=0.1, simplify=False, num_faces=1500
         ms.clear()
         return 1
     
-    if ultrafine:
-        ms.meshing_surface_subdivision_loop(iterations=18)
-        ms.generate_resampled_uniform_mesh(cellsize=pm.PercentageValue(0.05))
-        ms.meshing_surface_subdivision_loop(iterations=6)
-        ms.compute_scalar_by_distance_from_another_mesh_per_vertex(measuremesh=2, refmesh=0, maxdist=pm.PureValue(2 * deldist), signeddist=False)
-    else:
-        ms.compute_scalar_by_distance_from_another_mesh_per_vertex(measuremesh=1, refmesh=0, maxdist=pm.PureValue(2 * deldist), signeddist=False) # Delete points that are too far from the reference mesh
+    ms.compute_scalar_by_distance_from_another_mesh_per_vertex(measuremesh=1, refmesh=0, maxdist=pm.PureValue(2 * deldist), signeddist=False) # Delete points that are too far from the reference mesh
     ms.compute_selection_by_condition_per_vertex(condselect = f'(q>={deldist})') # Select vertices beyond the extrapolation distance
     ms.compute_selection_by_condition_per_face(condselect = f'(q0>={deldist} || q1>={deldist} || q2>={deldist})') # Select faces with any vertex beyond the extrapolation distance
     ms.meshing_remove_selected_vertices_and_faces()
