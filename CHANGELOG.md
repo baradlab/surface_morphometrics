@@ -4,6 +4,47 @@ All notable changes to the Surface Morphometrics toolkit are documented here.
 This project loosely follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [2.0.0b6] — beta (unreleased)
+
+Mesh generation decoupled from pycurv, in preparation for extracting it into a
+standalone importable library.
+
+### Added
+- First test coverage for the meshing path beyond `mrc2xyz`. `tests/test_xyz2ply.py`
+  (skipped when pymeshlab is unavailable) checks that Screened Poisson reconstructs a
+  known sphere shell, that isotropic remeshing hits the requested triangle area, that a
+  degenerate point cloud reports failure, and that every `xyz2ply` command-line option
+  reaches `xyz_to_ply`. `tests/test_mesh_wiring.py` needs neither pymeshlab nor vtk, so
+  it runs in CI: it pins that every `surface_generation` setting reaches the meshing
+  subprocess carrying its configured value, and that every documented setting has a
+  consumer — the two guards that would have caught the inert `ultrafine` below.
+
+### Changed
+- Mesh generation no longer depends on pycurv. `ply2vtp` imported `pycurv_io` and
+  `scipy.ndimage.morphology.distance_transform_edt` without ever referencing either;
+  the pycurv import was the only thing coupling the segmentation → mesh path to
+  pycurv/graph-tool. The three meshing stages now need only mrcfile, numpy, pandas,
+  pymeshlab, and vtk.
+- `ply2vtp` imports vtk inside `ply_to_vtp` rather than at module scope, as `export_obj`
+  already does, so `segmentation_to_meshes` can be imported without vtk installed.
+- Dropped the pymeshlab 2022.2.post3 `PercentageValue` compatibility shim, whose only
+  user was the removed `ultrafine` branch. This also removes an undeclared dependency on
+  `importlib_metadata`; `environment.yml` already requires pymeshlab >= 2023.12.
+
+### Removed
+- `surface_generation.ultrafine`, superseded by isotropic remeshing (`isotropic_remesh` /
+  `target_area`) and by density-guided mesh refinement. It had also been inert for some
+  time, by two independent paths: `run_xyz_to_ply` never passed `--ultrafine` to the
+  meshing subprocess, and `xyz2ply`'s own click wrapper never forwarded it either, so
+  only a direct Python call could reach the branch. Meshing output is unchanged. Configs
+  that still set the key keep loading without error.
+
+### Fixed
+- `ply2vtp.ply_to_vtp` raised `NameError` when the vtp write failed: the error branch
+  called `pexceptions.PySegInputError` but `pexceptions` was never imported, so the
+  function's only error path was broken. It now raises `RuntimeError`.
+- Removed a stray `print("open")` from `ply_to_vtp` that leaked into `make_meshes` output.
+
 ## [2.0.0b5] — beta
 
 Voxel-space OBJ export.
@@ -174,6 +215,7 @@ how the toolkit is invoked.
 - README reorganized (Installation / Quick start / Pipeline / Analysis &
   visualization / Reference / Upgrading) with a table of contents.
 
+[2.0.0b6]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b5]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b4]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b3]: https://github.com/baradlab/surface_morphometrics/releases
