@@ -6,7 +6,8 @@ This project loosely follows [Keep a Changelog](https://keepachangelog.com/) and
 
 ## [2.0.0b6] — beta (unreleased)
 
-Mesh generation decoupled from pycurv, in preparation for extracting it into a
+Consistent normal orientation, so curvature signs are comparable between tomograms;
+plus mesh generation decoupled from pycurv, in preparation for extracting it into a
 standalone importable library.
 
 ### Added
@@ -21,6 +22,42 @@ standalone importable library.
 - `tests/test_version.py` pins `surface_morphometrics.__version__` to `pyproject.toml`'s
   `version`. The two had drifted apart twice (fixed in 2.0.0b3, drifted again at
   2.0.0b5) because a release bumps one and forgets the other.
+- `morphometrics flip_normals` (**experimental, expert users only** — the heuristics are
+  not yet validated across datasets; always inspect the result before relying on it) —
+  orient each connected component's normals away from the
+  estimated inside of the organelle, so curvature signs are comparable between tomograms
+  instead of inheriting whichever direction the meshing step happened to produce. Every
+  sign-sensitive quantity is flipped to match: the principal curvatures **swap as well as
+  negate** (`kappa_1' = -kappa_2`, `kappa_2' = -kappa_1`), since pycurv keeps `kappa_1` as
+  the maximum — negating alone would invert that invariant. `mean_curvature`(`_VV`),
+  `shape_index_VV`/`_cat`, `min`/`max_curvature` and the normals follow; `gauss_curvature`
+  (`_VV`) and `curvedness_VV` are even in the normal and are deliberately left alone.
+  Connected components are labelled as part of the step, so it runs straight after
+  `pycurv` or `accept_refinement`. Outputs `<base>_oriented.gt`/`.vtp`/`.csv` with
+  `component_number` and `normals_flipped` properties. New docs: `docs/normals.md`.
+- `morphometrics manual_flip <name>_oriented.gt --labels 3,7` — the correction step, run
+  after inspecting an oriented surface. Since you cannot know which components the
+  automatic rule got wrong until you have looked at the result, this operates on the file
+  you just inspected, using the `component_number` stored in it, so the ids are exactly
+  the ones reported and coloured in ParaView. It flips **in either direction** (unlike
+  `--exclude-labels`, which can only suppress an automatic flip and requires re-running
+  from the original graph), edits `.gt`/`.vtp`/`.csv` in place so you can iterate, and is
+  an exact toggle — flipping twice restores every property bit-for-bit.
+- `flip_normals --exclude-labels '[SURFACE:]IDS'` (repeatable) leaves named components
+  unflipped at orientation time. Now mainly for scripted reproducibility: once the answer
+  for a dataset is known, recorded exclusions let one `flip_normals` call reproduce the
+  corrected result from scratch. Prefer `manual_flip` interactively.
+- `flip_normals --criterion {curvature,centroid}` chooses how outward is decided: positive
+  area-weighted mean curvature (default; local, works on open sheets) or normals pointing
+  away from the component's centre of mass (assumes a star-shaped component). Both are
+  always reported, along with a confidence, and components are flagged for manual checking
+  when curvature cancels out or when the two criteria disagree — their failure modes are
+  independent, so disagreement localizes exactly the components worth inspecting. On a
+  real cristae-rich IMM the two disagree on 24 of 28 components, systematically rather
+  than randomly. The components that actually need correcting are the small, disconnected,
+  tubular ones: a crista still attached to the IMM is part of that component and inherits
+  its (correct) orientation, while an isolated crista fragment is oriented by its own tube
+  geometry and ends up pointing the opposite way.
 
 ### Changed
 - `vtk` is now a declared dependency in `pyproject.toml` (`vtk>=9`). It was always

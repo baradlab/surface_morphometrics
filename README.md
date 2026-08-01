@@ -11,6 +11,8 @@ Everything is driven by a single `morphometrics` command plus a `config.yml` fil
 
 📖 **[Complete Quantifications Documentation](quantifications_documentation.md)** — reference guide for all morphological measurements and their interpretations.
 
+🧭 **[Normal orientation](docs/normals.md)** — make curvature signs comparable between tomograms, and check the result in ParaView.
+
 ## Contents
 - [Installation](#installation)
 - [Quick start](#quick-start)
@@ -108,6 +110,7 @@ Each step reads a `config.yml` and writes its outputs into the configured `work_
 | 1 | Segmentations → meshes | `morphometrics make_meshes config.yml` |
 | 2 | Curvature (pycurv) | `morphometrics pycurv config.yml` |
 | 3 | *(optional)* [Mesh refinement](#mesh-refinement-optional) | `morphometrics refine_mesh config.yml` → `accept_refinement` |
+| – | *(recommended)* [Orient normals](docs/normals.md) | `morphometrics flip_normals config.yml` |
 | 4 | Distances & orientations | `morphometrics distances_orientations config.yml` |
 | 5 | [Thickness](#data-organization-for-thickness-and-refinement) (needs tomograms) | `morphometrics sample_density config.yml` → `measure_thickness` |
 | 6 | Aggregate statistics | `morphometrics stats config.yml <name>` |
