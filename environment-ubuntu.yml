@@ -29,6 +29,7 @@ dependencies:
     - pymeshlab>=2023.12
     - git+https://github.com/vladanl/Pyto.git
     - git+https://github.com/bbarad/pycurv.git
+    - git+https://github.com/hemanthkapa/pycurv-gpu.git
     - git+https://github.com/hemanthkapa/napari-vedo-bridge.git
     - napari-tomoslice
     - napari-timelapse-processor

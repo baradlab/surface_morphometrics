@@ -16,6 +16,7 @@ Everything is driven by a single `morphometrics` command plus a `config.yml` fil
 - [Quick start](#quick-start)
 - [Example data](#example-data)
 - [The pipeline](#the-pipeline)
+- [GPU curvature (pycurv-gpu)](#gpu-curvature-pycurv-gpu)
 - [Analysis & visualization](#analysis--visualization)
 - [Reference](#reference)
 - [Troubleshooting](#troubleshooting)
@@ -32,7 +33,8 @@ The fastest, easiest starting point for most Linux boxes, and now for Mac as wel
 1. Clone the repository: `git clone https://github.com/baradlab/surface_morphometrics.git`
 2. Create the environment (this also installs the toolkit and the `morphometrics` command via `pip install -e .`): `conda env create -f environment.yml`
 3. Activate it: `conda activate morphometrics`
-4. Check the install: `morphometrics --help` should list the pipeline subcommands.
+4. *(GPU machines)* Install a CUDA-enabled PyTorch build into the same env — see [pytorch.org](https://pytorch.org/get-started/locally/). `pycurv-gpu` is already installed by `environment.yml`.
+5. Check the install: `morphometrics --help` should list the pipeline subcommands.
 
 > Older Ubuntu installs (and some other Linux distributions) have known issues with graph-tool. If the main environment file fails, try `conda env create -f environment-ubuntu.yml` instead (tested on Ubuntu 22.04 LTS).
 
@@ -106,13 +108,31 @@ Each step reads a `config.yml` and writes its outputs into the configured `work_
 | 0 | Create a config | `morphometrics new_config` |
 | – | *(optional)* [Validate the setup](#checking-your-setup-and-progress) | `morphometrics validate config.yml` |
 | 1 | Segmentations → meshes | `morphometrics make_meshes config.yml` |
-| 2 | Curvature (pycurv) | `morphometrics pycurv config.yml` |
+| 2 | Curvature (pycurv) | `morphometrics pycurv config.yml` ([GPU](#gpu-curvature-pycurv-gpu) optional) |
 | 3 | *(optional)* [Mesh refinement](#mesh-refinement-optional) | `morphometrics refine_mesh config.yml` → `accept_refinement` |
 | 4 | Distances & orientations | `morphometrics distances_orientations config.yml` |
 | 5 | [Thickness](#data-organization-for-thickness-and-refinement) (needs tomograms) | `morphometrics sample_density config.yml` → `measure_thickness` |
 | 6 | Aggregate statistics | `morphometrics stats config.yml <name>` |
 
 Most steps also accept a single input (e.g. `morphometrics pycurv config.yml TE1_OMM.surface.vtp`, `morphometrics distances_orientations config.yml TE1.mrc`) so you can parallelize per tomogram on a cluster.
+
+### GPU curvature (pycurv-gpu)
+Step 2 can use [pycurv-gpu](https://github.com/hemanthkapa/pycurv-gpu) instead of CPU pycurv. Outputs (`.vtp` / `.csv` / `.gt`) keep the same names and properties, so distances, thickness, refinement, and the GUI work unchanged.
+
+Enable it either way:
+```yaml
+# in config.yml under curvature_measurements
+use_gpu: true
+# gpu_device: null        # optional: cuda (null = auto; never falls back to CPU)
+# gpu_batch_size: 1024    # optional tuning
+```
+```bash
+morphometrics pycurv config.yml --gpu
+morphometrics pycurv config.yml TE1_OMM.surface.vtp --gpu
+```
+`--gpu` overrides `use_gpu: false`. `refine_mesh` also honors `use_gpu` from config for its final pycurv pass.
+
+Requirements: CUDA-capable GPU + a CUDA PyTorch build in the morphometrics env (`pycurv-gpu` itself is installed by `environment.yml`). Without CUDA, leave `use_gpu: false` (default) and use CPU pycurv.
 
 ### Configuration
 `morphometrics new_config` writes a fully-commented `config.yml` into the current directory (`-o NAME` for a different name); edit it for your project. For a stripped-down starting point, `morphometrics new_config --simple` writes a minimal config with just the most commonly-adjusted settings — directories, `segmentation_values`, cores, the main meshing options, and the thickness/refinement averaging radii; everything omitted falls back to documented defaults, so a partial config still runs. A few starting tips:
@@ -250,6 +270,7 @@ The toolkit is the `surface_morphometrics` Python package; the pipeline steps ar
 - `Gaussian or Mean curvature of X has a large computation error` — safe to ignore (pycurv cleans these up); they are suppressed by default.
 - MRC files from AMIRA (and some other software, e.g. Dragonfly) lack proper machine stamps; open with `mrcfile.open(filename, permissive=True)`.
 - If pycurv seems to hang indefinitely, try setting `cores: 1` in the config.
+- `GPU pycurv requires PyTorch` / `CUDA is not available` — install a CUDA torch build into the morphometrics env, or leave `use_gpu: false`.
 
 ---
 
@@ -277,7 +298,7 @@ Two config keys were also renamed: `data_dir` → `seg_dir`, and `max_triangles`
 ---
 
 ## Dependencies
-Numpy, Scipy, Pandas, mrcfile, Click, Matplotlib, starfile, Pymeshlab, and [PyCurv](https://github.com/kalemaria/pycurv) (which pulls in Pyto and graph-tool). The conda environment files install everything; see [Installation](#installation).
+Numpy, Scipy, Pandas, mrcfile, Click, Matplotlib, starfile, Pymeshlab, [PyCurv](https://github.com/kalemaria/pycurv) (which pulls in Pyto and graph-tool), and [pycurv-gpu](https://github.com/hemanthkapa/pycurv-gpu) for optional GPU curvature. The conda environment files install everything except a CUDA PyTorch build (install that separately on GPU machines); see [Installation](#installation).
 
 ---
 

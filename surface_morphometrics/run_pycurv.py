@@ -37,7 +37,9 @@ from . import curvature
 @click.argument("surface", required=False, default=None)
 @click.option("-f", "--force", is_flag=True, default=False,
               help="Skip interactive confirmation prompts.")
-def run_pycurv_cli(configfile, surface, force):
+@click.option("--gpu", is_flag=True,
+              help="Use pycurv-gpu (CUDA) instead of CPU pycurv.")
+def run_pycurv_cli(configfile, surface, force, gpu):
     """Run pycurv vector-voting curvature analysis on surface meshes.
 
     CONFIGFILE: path to config.yml.
@@ -45,6 +47,9 @@ def run_pycurv_cli(configfile, surface, force):
     in work_dir are processed.
     """
     config = load_config(configfile, require=("work_dir",))
+    use_gpu = gpu or config["curvature_measurements"].get("use_gpu", False)
+    if use_gpu:
+        curvature._require_gpu_backend(config["curvature_measurements"].get("gpu_device"))
 
     # Warn if configured cores exceed logical cores
     cores = config["cores"]
@@ -79,7 +84,10 @@ def run_pycurv_cli(configfile, surface, force):
                                  radius_hit=config["curvature_measurements"]["radius_hit"],
                                  min_component=config["curvature_measurements"]["min_component"],
                                  exclude_borders=config["curvature_measurements"]["exclude_borders"],
-                                 cores=config["cores"])
+                                 cores=config["cores"],
+                                 use_gpu=use_gpu,
+                                 gpu_device=config["curvature_measurements"].get("gpu_device"),
+                                 gpu_batch_size=config["curvature_measurements"].get("gpu_batch_size", 1024))
             print("Completed {}\n".format(surface_file))
         except Exception as e:
             print("WARNING: Skipping {} due to error: {}\n".format(surface_file, e))
@@ -91,7 +99,8 @@ def run_pycurv_cli(configfile, surface, force):
             print("  - {}".format(s))
 
     print("-------------------------------------------------------")
-    print("Pycurv complete. It is highly recommended to check the AVV vtp file with paraview to confirm good results.")
+    label = "GPU pycurv" if use_gpu else "Pycurv"
+    print(f"{label} complete. It is highly recommended to check the AVV vtp file with paraview to confirm good results.")
     print("Pycurv Citation: Salfer M, Collado JF, Baumeister W, Fernández-Busnadiego R, Martínez-Sánchez A. Reliable estimation of membrane curvature for cryo-electron tomography. PLOS Comp Biol 2020.")
     print("Pipeline Citation: Barad BA*, Medina M*, Fuentes D, Wiseman RL, Grotjahn DA. Quantifying organellar ultrastructure in cryo-electron tomography using a surface morphometrics pipeline. J Cell Biol 2023.")
 

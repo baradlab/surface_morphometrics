@@ -28,6 +28,9 @@ curvature_measurements:
   radius_hit: 9 # This corresponds to the radius of the smallest feature of interest, roughly, for neighborhood determination. 8-15 seems to be a good range for mitochondria
   min_component: 30 # The minimum number of triangles for a component to be considered for curvature measurement.
   exclude_borders: 1 # Values greater than zero exclude the border from the curvature calculation by n nm/angstroms.
+  use_gpu: false # Set true to use pycurv-gpu (CUDA) instead of CPU pycurv.
+  gpu_device: null # Optional torch device: cuda. null = auto-select.
+  gpu_batch_size: 1024 # SSSP/voting batch size for pycurv-gpu.
 distance_and_orientation_measurements:
   mindist: 3 # Minimum distance between two points for them to be considered for distance measurement.
   maxdist: 400 # Maximum distance between two points for them to be considered for distance measurement.

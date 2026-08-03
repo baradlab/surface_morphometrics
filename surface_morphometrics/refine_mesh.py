@@ -624,7 +624,8 @@ def recompute_normals(surf):
     return normals_filter.GetOutput()
 
 
-def run_pycurv_refinement(vtp_file, output_base, pixel_size, radius_hit, cores=6):
+def run_pycurv_refinement(vtp_file, output_base, pixel_size, radius_hit, cores=6,
+                          use_gpu=False, gpu_device=None, gpu_batch_size=1024):
     """
     Run pycurv normal vector voting on a refined surface.
 
@@ -645,6 +646,12 @@ def run_pycurv_refinement(vtp_file, output_base, pixel_size, radius_hit, cores=6
         Radius for normal vector voting
     cores : int
         Number of cores for parallel processing
+    use_gpu : bool
+        If True, dispatch to pycurv-gpu in the subprocess
+    gpu_device : str or None
+        Optional torch device for pycurv-gpu
+    gpu_batch_size : int
+        SSSP/voting batch size for pycurv-gpu
 
     Returns
     -------
@@ -671,9 +678,11 @@ def run_pycurv_refinement(vtp_file, output_base, pixel_size, radius_hit, cores=6
     # Must include NVV_rh*.gt and AVV_rh*.gt: pycurv skips NVV if NVV_rh*.gt
     # exists, and uses that stale graph for curvature estimation, which then
     # propagates wrong normals into the next iteration's profile sampling.
+    # Also delete pycurv-gpu's .gpu_normals.npz Pass-1 cache for the same reason.
     stale_exts = [
         ".scaled_cleaned.gt", ".scaled_cleaned.vtp",
         f".NVV_rh{radius_hit}.gt",
+        f".NVV_rh{radius_hit}.gpu_normals.npz",
         f".AVV_rh{radius_hit}.gt", f".AVV_rh{radius_hit}.vtp",
         f".AVV_rh{radius_hit}.csv", f".AVV_rh{radius_hit}_sampling.csv",
     ]
@@ -700,16 +709,22 @@ def run_pycurv_refinement(vtp_file, output_base, pixel_size, radius_hit, cores=6
         "os.environ['OMP_NUM_THREADS'] = '1'\n"  # before importing graph-tool/pycurv
         "from surface_morphometrics import curvature\n"
         "surf, outdir, rh_s, cores = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])\n"
+        "use_gpu = sys.argv[5] == '1'\n"
+        "gpu_device = sys.argv[6] or None\n"
+        "gpu_batch_size = int(sys.argv[7])\n"
         "try:\n"
         "    rh = int(rh_s)\n"          # preserve int vs float so AVV_rh<N> filenames match
         "except ValueError:\n"
         "    rh = float(rh_s)\n"
         "curvature.run_pycurv(surf, outdir, scale=1.0, radius_hit=rh,\n"
-        "                     min_component=0, exclude_borders=0, cores=cores)\n"
+        "                     min_component=0, exclude_borders=0, cores=cores,\n"
+        "                     use_gpu=use_gpu, gpu_device=gpu_device,\n"
+        "                     gpu_batch_size=gpu_batch_size)\n"
     )
     proc = subprocess.run(
         [sys.executable, "-c", runner,
-         f"{basename}.surface.vtp", output_dir, str(radius_hit), str(cores)],
+         f"{basename}.surface.vtp", output_dir, str(radius_hit), str(cores),
+         "1" if use_gpu else "0", gpu_device or "", str(gpu_batch_size)],
         env={**os.environ, "OMP_NUM_THREADS": "1"},
     )
     if proc.returncode != 0:
@@ -785,7 +800,8 @@ def build_lightweight_graph(surf, output_gt_path):
 
 def finalize_surface_with_pycurv(surface_vtp, mrc_file, output_base, pixel_size,
                                  radius_hit, sample_spacing, scan_range, angstroms,
-                                 cores, average_radius, compute_thickness=True):
+                                 cores, average_radius, compute_thickness=True,
+                                 use_gpu=False, gpu_device=None, gpu_batch_size=1024):
     """Run full pycurv on an already-refined surface to produce the final output.
 
     Intermediate refinement iterations skip pycurv (they build fast lightweight
@@ -809,6 +825,12 @@ def finalize_surface_with_pycurv(surface_vtp, mrc_file, output_base, pixel_size,
     compute_thickness : bool
         If True, also measure the local thickness distribution on the finalized
         surface (for the convergence histogram).
+    use_gpu : bool
+        If True, dispatch final pycurv to pycurv-gpu.
+    gpu_device : str or None
+        Optional torch device for pycurv-gpu.
+    gpu_batch_size : int
+        SSSP/voting batch size for pycurv-gpu.
 
     Returns
     -------
@@ -824,7 +846,8 @@ def finalize_surface_with_pycurv(surface_vtp, mrc_file, output_base, pixel_size,
     gc.collect()
     print("Running full pycurv normal vector voting for a curvature-ready final surface...")
     graph_file, surface_file = run_pycurv_refinement(
-        surface_vtp, output_base, pixel_size, radius_hit, cores)
+        surface_vtp, output_base, pixel_size, radius_hit, cores,
+        use_gpu=use_gpu, gpu_device=gpu_device, gpu_batch_size=gpu_batch_size)
 
     result = {
         'graph_file': graph_file,
@@ -863,7 +886,8 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
                           original_positions=None, max_total_offset=None, use_xcorr=False,
                           smooth_offsets=True, offset_smoothing_radius=None,
                           laplacian_iterations=0, laplacian_lambda=0.5, lowpass_sigma=0,
-                          run_full_pycurv=True, compute_thickness=False):
+                          run_full_pycurv=True, compute_thickness=False,
+                          use_gpu=False, gpu_device=None, gpu_batch_size=1024):
     """
     Perform a single iteration of mesh refinement.
 
@@ -1057,7 +1081,8 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
     if run_full_pycurv:
         print("Running pycurv normal vector voting...")
         new_graph_file, new_surface_file = run_pycurv_refinement(
-            refined_vtp, output_base, pixel_size, radius_hit, cores
+            refined_vtp, output_base, pixel_size, radius_hit, cores,
+            use_gpu=use_gpu, gpu_device=gpu_device, gpu_batch_size=gpu_batch_size,
         )
         sampling_csv = f"{output_base}.AVV_rh{radius_hit}_sampling.csv"
     else:
@@ -1267,6 +1292,9 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
     # Try to get pixel size from a known location or default
     # Note: pixel_size might need to be determined from the data
     radius_hit = curvature_config.get("radius_hit", 9)
+    use_gpu = curvature_config.get("use_gpu", False)
+    gpu_device = curvature_config.get("gpu_device")
+    gpu_batch_size = curvature_config.get("gpu_batch_size", 1024)
     # Average radius: prefer mesh_refinement, fall back to thickness_measurements
     average_radius = refinement_config.get("average_radius", thickness_config.get("average_radius", 12))
     # Progressive radius reduction settings
@@ -1709,7 +1737,9 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
                     fin = finalize_surface_with_pycurv(
                         current_vtp, mrc_file, iter_output_base, pixel_size,
                         radius_hit, sample_spacing, scan_range, angstroms, cores,
-                        current_avg_radius, compute_thickness=True)
+                        current_avg_radius, compute_thickness=True,
+                        use_gpu=use_gpu, gpu_device=gpu_device,
+                        gpu_batch_size=gpu_batch_size)
                     final_entry = iteration_stats[-1]
                     final_entry['graph_file'] = fin['graph_file']
                     final_entry['surface_file'] = fin['surface_file']

@@ -40,6 +40,9 @@ DEFAULTS = {
         "radius_hit": 9,
         "min_component": 30,
         "exclude_borders": 1,
+        "use_gpu": False,
+        "gpu_device": None,
+        "gpu_batch_size": 1024,
     },
     "distance_and_orientation_measurements": {
         "mindist": 3,
