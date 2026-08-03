@@ -318,12 +318,38 @@ def histogram(data, areas, labels, title, xlabel, filename="hist.svg", bins=50, 
     _colors_light = custom_colors_light if custom_colors_light is not None else colors_light
     assert len(data)==len(areas)
     assert len(data)==len(labels)
+
+    # Drop unmeasured (non-finite) values and their paired areas before plotting.
+    # Thickness is NaN wherever no bilayer could be measured -- most often a linescan
+    # that left the tomogram -- and an all-NaN series makes matplotlib's range
+    # autodetection raise ("autodetected range of [nan, nan] is not finite"), which
+    # would lose a whole run at the final plotting step. Filtering here rather than in
+    # each caller keeps every entry point (thickness, stats, single_file_histogram)
+    # consistent. The original series index is kept so colors do not shift when a
+    # series is omitted.
+    series = []
+    for index, (value, weight, label) in enumerate(zip(data, areas, labels)):
+        value = np.asarray(value, dtype=float)
+        weight = np.asarray(weight, dtype=float)
+        finite = np.isfinite(value) & np.isfinite(weight)
+        dropped = value.size - int(np.count_nonzero(finite))
+        if dropped:
+            print(f"  {label}: {dropped} of {value.size} values are unmeasured (NaN) "
+                  "and are excluded from the histogram")
+        if not np.any(finite):
+            print(f"  {label}: no measured values; omitted from the histogram")
+            continue
+        series.append((index, value[finite], weight[finite], label))
+    if not series:
+        print(f"No measured values for '{title}'; skipping histogram.")
+        return False
+
     fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
     if logx:
         bins = np.logspace(np.log10(range[0]),np.log10(range[1]), bins)
         ax.set_xscale("log")
-    for index, value in enumerate(data):
-        n,binset,_ = ax.hist(value, bins=bins, weights=areas[index], label=labels[index], ec=_colors[index],fc=_colors_light[index],histtype="stepfilled", density=True, range = range) #
+    for index, value, weight, label in series:
+        n,binset,_ = ax.hist(value, bins=bins, weights=weight, label=label, ec=_colors[index],fc=_colors_light[index],histtype="stepfilled", density=True, range = range) #
         if vlines:
             delta = (binset[1]-binset[0])/2
             idx = n.argmax()

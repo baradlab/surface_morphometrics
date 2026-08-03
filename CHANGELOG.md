@@ -48,6 +48,44 @@ standalone importable library.
   that still set the key keep loading without error.
 
 ### Fixed
+- **Density samples outside the tomogram were extrapolated instead of reported as
+  missing.** `sample_density` called `interpn(..., fill_value=None)`, which is scipy's
+  *extrapolate* setting, not its NaN default — so a linescan running off the edge of the
+  volume produced invented values (linear extrapolation from the edge is unbounded) that
+  the thickness fitter could not distinguish from real density. This is a routine case,
+  not an edge case: the default scan range is ±10 nm along the normal, tomograms are thin
+  in z, and a membrane lying flat near the top or bottom of the volume scans straight out
+  of it. Out-of-bounds samples are now NaN, and `sample_density` reports how many
+  triangles are affected.
+  - Profiles containing NaN are excluded from neighborhood averaging
+    (`_thickness_worker.usable_profile_rows`) at all three sites that average over
+    neighbors. Without this the fix would have made things worse: a *single*
+    out-of-bounds neighbor turned the weighted average NaN and destroyed the measurement
+    for a triangle that was itself well inside the volume. Verified — a good triangle
+    with one bad neighbor now measures correctly where it previously returned NaN.
+  - A triangle with no usable neighbors reports NaN thickness, which is what the rest of
+    the thickness code already expects, rather than a confident number from data that
+    does not exist.
+  - In `refine_mesh`, such a triangle is marked a failed fit so the existing
+    neighbor-interpolation stage fills its offset in from triangles that did fit. A final
+    guard replaces any non-finite offset with zero before vertices are displaced, since a
+    NaN offset would move a vertex to NaN and corrupt the mesh irrecoverably.
+  - `morphometrics_stats.histogram` no longer raises on unmeasured data. An all-NaN
+    series previously reached matplotlib's range autodetection and threw
+    `ValueError: autodetected range of [nan, nan] is not finite` — at the very end of
+    `measure_thickness`, after every per-surface computation and most output files were
+    already written. Non-finite values and their paired areas are now dropped per series,
+    a series with nothing measured is omitted (with a message naming it), and a plot with
+    no measured data at all is skipped rather than crashing. Verified that dropping them
+    leaves the area-weighted density unchanged, since they leave both the bin counts and
+    the normalization. This protects every caller, not just thickness.
+  - `measure_thickness` warns, naming the file, when a surface yields no thickness at
+    all, pointing at a surface outside its tomogram or a mismatched tomogram pairing —
+    previously this surfaced only as a silently missing series in the summary plots.
+  - **This changes results near tomogram boundaries**: thickness values that were
+    previously derived from extrapolated density are now NaN. Expect fewer measured
+    triangles at the top and bottom of thin tomograms, and treat prior thickness
+    distributions from such regions as unreliable.
 - `ply2vtp.ply_to_vtp` raised `NameError` when the vtp write failed: the error branch
   called `pexceptions.PySegInputError` but `pexceptions` was never imported, so the
   function's only error path was broken. It now raises `RuntimeError`.
