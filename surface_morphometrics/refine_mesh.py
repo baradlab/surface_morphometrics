@@ -215,7 +215,7 @@ def compute_triangle_offsets(graph, sampling_data, x_positions, average_radius, 
 
     if use_xcorr:
         # Serial processing for xcorr - faster than multiprocessing for simple computation
-        from ._thickness_worker import _xcorr_offset
+        from ._thickness_worker import _xcorr_offset, usable_profile_rows
         print(f"  Computing offsets using cross-correlation (serial)...")
 
         results = []
@@ -228,6 +228,16 @@ def compute_triangle_offsets(graph, sampling_data, x_positions, average_radius, 
             if len(neighbors) == 0:
                 results.append((0, np.nan, np.nan, 0))
                 continue
+
+            # Drop neighbors whose linescan left the tomogram (NaN samples). Marking
+            # the triangle as a failed fit (method 0) rather than emitting a NaN
+            # offset lets the existing neighbor-interpolation stage fill it in from
+            # triangles that did fit, instead of moving this vertex nowhere useful.
+            inside = usable_profile_rows(thickness_arr[neighbors])
+            if not np.any(inside):
+                results.append((0, np.nan, np.nan, 0))
+                continue
+            l, neighbors = l[inside], neighbors[inside]
 
             # Compute weighted average profile
             weights = 1.0 / (1.0 + l)
@@ -360,6 +370,16 @@ def compute_triangle_offsets(graph, sampling_data, x_positions, average_radius, 
         final_fallback = fallback_offset if fallback_offset is not None else 0.0
         offsets[needs_replacement] = final_fallback
         print(f"  No good fits available; replaced {n_replaced} with global midpoint {final_fallback:+.3f} nm")
+
+    # 3b. Safety net: no non-finite offset may reach apply_vertex_displacements, which
+    # would move vertices to NaN and corrupt the mesh irrecoverably. Every known source
+    # is handled above; this catches anything new (e.g. a fit returning NaN while
+    # reporting success) and reports it rather than failing silently.
+    nonfinite = ~np.isfinite(offsets)
+    if np.any(nonfinite):
+        print(f"  WARNING: {int(np.sum(nonfinite))} non-finite offsets replaced with 0 "
+              "(no displacement); these triangles are left where they are.")
+        offsets[nonfinite] = 0.0
 
     # 4a. For Gaussian iterations: center the offset field on the global midpoint.
     # Per-triangle dual Gaussian fits underestimate the global centering correction
