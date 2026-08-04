@@ -43,16 +43,47 @@ negate**, because pycurv keeps `kappa_1` as the maximum and `kappa_2` as the min
 | `gauss_curvature_VV`, `gauss_curvature` | **unchanged** — a product of two negated values |
 | `curvedness_VV` | **unchanged** — depends only on magnitudes |
 | `area`, `xyz`, `thickness`, distances | unchanged |
+| triangle winding (vertex order) | **reversed** — see below |
 
 The swap is what preserves `kappa_1 >= kappa_2`; negating alone would invert that
 invariant everywhere. Gaussian curvature and curvedness are even in the normal and must
 *not* be negated.
 
+**Winding is reversed too, and this is what renderers actually see.** The `.vtp` carries
+no active VTK `NORMALS` array (`GetCellData().GetNormals()` is `None`), so ChimeraX,
+Blender and ParaView all light the surface from triangle winding order — the stored
+`n_v`/`normal` arrays are just data to them. Flipping the arrays alone would be invisible
+in ChimeraX and would leave the file self-contradictory, with the geometry saying one
+thing and the properties another. Reversing each flipped triangle's corner order keeps
+them consistent: on a test sphere, stored normals and winding-derived normals agree for
+100% of triangles both before and after a flip.
+
+The oriented `.vtp` also publishes explicit normals, which pycurv's own output does not.
+`n_v` is designated the active VTK cell-`NORMALS` attribute, and a matching per-point
+`Normals` array — the unit-length mean of each point's incident triangle normals — is
+added for smooth-shading renderers. Between that and the reversed winding, a viewer gets
+the same answer however it decides which way a face points. Verified through a write and
+re-read: both attributes survive the XML round-trip and follow a flip.
+
+> If you open these in ChimeraX through a custom VTP reader rather than a VTK-based
+> loader, that reader has to look at the `Normals` arrays for this to take effect.
+
+## pycurv's sign convention
+
+**An outward normal on a convex surface gives NEGATIVE mean curvature.** This is measured,
+not assumed: a meshed sphere of radius 24.99 nm whose normals all point outward
+(`n · radial = +1.000` at every triangle) reports `mean_curvature_VV = -0.0400`, exactly
+−1/R, with `kappa_1 = kappa_2 = −1/R`.
+
+So "orient outward" means driving area-weighted `mean_curvature_VV` **negative**. Getting
+this backwards points every normal into the organelle instead of out of it — most visibly
+on tubes, where the normals end up in the lumen.
+
 ## The heuristic, and where it fails
 
-Each component is flipped so its **area-weighted mean `mean_curvature_VV` is positive**.
-For a closed-ish compartment — OMM, the IMM boundary, an ER sheet — that correctly puts
-the normals on the outside.
+Each component is flipped so its **area-weighted mean `mean_curvature_VV` is negative**,
+i.e. its normals point outward. For a closed-ish compartment — OMM, the IMM boundary, an
+ER sheet — that correctly puts the normals on the outside.
 
 It is wrong for **disconnected tubular cristae**, and the distinction matters: a crista
 still attached to the IMM is part of that component and simply inherits the parent's
@@ -69,21 +100,18 @@ result before relying on it.
 There are two independent ways to ask which way is out, and the command reports both:
 
 - **`--criterion curvature`** (default) — flip until area-weighted `mean_curvature_VV` is
-  positive. Purely local, so it works on open sheets and fragments, and needs no
-  assumption about the component being closed. It is uninformative when a component's
-  curvature cancels out.
+  negative, pycurv's sign for an outward normal. Purely local, so it works on open sheets
+  and fragments, and needs no assumption about the component being closed. It is
+  uninformative when a component's curvature cancels out.
 - **`--criterion centroid`** — flip until normals point away from the component's centre
   of mass. This assumes the component is *star-shaped* (every point visible from the
   centroid). Decisive for closed blobs; meaningless for an open sheet, where the centroid
   lies on the surface and every normal is perpendicular to the radial direction.
 
-They **systematically disagree on tubular geometry**. Measured on a real cristae-rich
-IMM, they disagreed on 24 of 28 components (on a closed OMM, 2 of 5) — and not randomly:
-every component with `mean_H > 0` had `centroid < 0`. For a crista tube, normals pointing
-out of the lumen give a *positive* centroid alignment but a *negative* mean curvature, so
-the two rules point them opposite ways. Which you want is a biology question — note that
-a crista lumen is continuous with the intermembrane space, so "away from the matrix"
-means *into* the crista lumen.
+The two mostly **agree**: on a real cristae-rich IMM they agree on 24 of 28 components,
+and on a closed OMM on 2 of 5. Where they differ it is usually a component whose shape
+breaks the centroid assumption — an open sheet or a folded lamella — so the disagreement
+points at a genuinely ambiguous case rather than a bug in either rule.
 
 Because their failure modes are independent, **disagreement is a better flag than either
 confidence alone**. Each component is reported with both, plus a `confidence` — the ratio

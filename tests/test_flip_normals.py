@@ -245,3 +245,94 @@ def test_manual_flip_toggle_semantics():
     already = np.array([1, 1, 0, 0], dtype=bool)
     manual = np.array([1, 0, 1, 0], dtype=bool)
     assert list((already ^ manual).astype(int)) == [0, 1, 1, 0]
+
+
+def test_outwardness_is_negated_mean_curvature():
+    # pycurv's convention, measured on a meshed sphere of radius 24.99 nm whose
+    # normals all point outward (n . radial = +1.000): mean_curvature_VV = -0.0400,
+    # exactly -1/R. So outward is NEGATIVE mean curvature.
+    assert fn.outwardness_from_curvature({1: -0.04, 2: 0.04}) == {1: 0.04, 2: -0.04}
+
+
+def test_convex_surface_with_outward_normals_is_left_alone():
+    # The sphere case: H = -1/R with normals already outward -> nothing to do.
+    assert fn.decide_flips(fn.outwardness_from_curvature({1: -0.04})) == {1: False}
+
+
+def test_convex_surface_with_inward_normals_is_flipped():
+    assert fn.decide_flips(fn.outwardness_from_curvature({1: 0.04})) == {1: True}
+
+
+def test_curvature_and_centroid_criteria_agree_on_a_sphere():
+    # Both criteria must call the same orientation "outward"; they disagreed under
+    # the old inverted sign, which made the cross-check report false conflicts.
+    outward_curvature = fn.outwardness_from_curvature({1: -0.04})   # normals outward
+    centroid_alignment = {1: 1.0}                                   # normals outward
+    assert (outward_curvature[1] > 0) == (centroid_alignment[1] > 0)
+
+
+def test_reverse_winding_only_touches_flipped_triangles():
+    pytest.importorskip("graph_tool")
+    from graph_tool import Graph
+
+    graph = Graph(directed=False)
+    graph.add_vertex(2)
+    corners = graph.new_vertex_property("python::object")
+    triangle = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+    corners[graph.vertex(0)] = list(triangle)
+    corners[graph.vertex(1)] = list(triangle)
+    graph.vp["points"] = corners
+
+    fn._reverse_winding(graph, np.array([True, False]))
+
+    assert list(graph.vp["points"][graph.vertex(0)]) == triangle[::-1]
+    assert list(graph.vp["points"][graph.vertex(1)]) == triangle
+
+
+def _triangle_polydata(normal=(0.0, 0.0, 1.0), name="n_v"):
+    """Two triangles sharing an edge, carrying a per-cell normal array."""
+    vtk = pytest.importorskip("vtk")
+    from vtk.util.numpy_support import numpy_to_vtk
+
+    points = vtk.vtkPoints()
+    for xyz in ([0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]):
+        points.InsertNextPoint(*xyz)
+    polys = vtk.vtkCellArray()
+    for corners in ((0, 1, 2), (1, 3, 2)):
+        triangle = vtk.vtkTriangle()
+        for slot, corner in enumerate(corners):
+            triangle.GetPointIds().SetId(slot, corner)
+        polys.InsertNextCell(triangle)
+    poly = vtk.vtkPolyData()
+    poly.SetPoints(points)
+    poly.SetPolys(polys)
+    array = numpy_to_vtk(np.tile(np.asarray(normal, dtype=float), (2, 1)), deep=True)
+    array.SetName(name)
+    poly.GetCellData().AddArray(array)
+    return poly
+
+
+def test_attach_active_normals_publishes_cell_and_point_normals():
+    from vtk.util.numpy_support import vtk_to_numpy
+    poly = _triangle_polydata(normal=(0.0, 0.0, 1.0))
+    assert poly.GetCellData().GetNormals() is None      # pycurv leaves none active
+
+    assert fn.attach_active_normals(poly) is True
+
+    assert poly.GetCellData().GetNormals().GetName() == "n_v"
+    point_normals = vtk_to_numpy(poly.GetPointData().GetNormals())
+    assert np.allclose(point_normals, [0.0, 0.0, 1.0])
+    assert np.allclose(np.linalg.norm(point_normals, axis=1), 1.0)
+
+
+def test_attach_active_normals_follows_a_flipped_normal():
+    from vtk.util.numpy_support import vtk_to_numpy
+    poly = _triangle_polydata(normal=(0.0, 0.0, -1.0))
+    fn.attach_active_normals(poly)
+    assert np.allclose(vtk_to_numpy(poly.GetPointData().GetNormals()), [0.0, 0.0, -1.0])
+
+
+def test_attach_active_normals_reports_a_surface_without_n_v():
+    poly = _triangle_polydata(name="something_else")
+    assert fn.attach_active_normals(poly) is False
+    assert poly.GetPointData().GetNormals() is None

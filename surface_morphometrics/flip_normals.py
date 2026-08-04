@@ -11,9 +11,18 @@ surface: two tomograms of the same organelle can disagree on whether a bulge is
 positively or negatively curved, which makes pooled curvature statistics
 meaningless.
 
-This orients each connected component so that its area-weighted mean curvature is
-positive -- i.e. normals point away from the estimated inside of the organelle --
-and flips every sign-sensitive quantity to match.
+This orients each connected component so its normals point away from the estimated
+inside of the organelle, and flips every sign-sensitive quantity to match.
+
+In pycurv's sign convention an outward normal on a convex surface gives NEGATIVE
+mean curvature -- verified on a meshed sphere of radius 24.99 nm, where normals
+pointing outward at every triangle give mean_curvature_VV = -0.0400 = -1/R -- so
+"outward" means driving area-weighted mean_curvature_VV negative, not positive.
+
+Triangle winding is reversed on flipped components too. The .vtp carries no active
+VTK NORMALS array, so ChimeraX, Blender and friends light the surface from winding
+order: without reversing it a flip would be invisible to them, and the stored
+normals would contradict the geometry.
 
 The heuristic is right for closed-ish compartments (OMM, IMM boundary, ER). It is
 wrong for *disconnected tubular cristae*: a crista still attached to the IMM is
@@ -175,6 +184,21 @@ def component_centroid_alignment(component_numbers, xyz, normals, area):
     return out
 
 
+def outwardness_from_curvature(component_curvatures):
+    """Convert mean curvature into an outwardness score (positive = pointing out).
+
+    pycurv's sign convention is that an OUTWARD normal on a convex surface gives
+    NEGATIVE mean curvature: measured on a meshed sphere of radius 24.99 nm whose
+    normals all point outward (n . radial = +1.000 at every triangle),
+    mean_curvature_VV = -0.0400, i.e. exactly -1/R, with kappa_1 = kappa_2 = -1/R.
+
+    So "outward" is negative mean curvature, and this negation is what puts the
+    curvature criterion on the same footing as the centroid one, where positive
+    already means pointing away from the interior.
+    """
+    return {cid: -curvature for cid, curvature in component_curvatures.items()}
+
+
 def flip_confidence(component_curvatures, component_curvednesses):
     """How decisive each component's flip decision is, as |mean H| / mean curvedness.
 
@@ -320,7 +344,8 @@ def flip_normals_single(graph_file, output_dir, exclude_values=(), min_component
         graph.vp["n_v"].get_2d_array([0, 1, 2]).T,
         area)
 
-    scores = alignments if criterion == "centroid" else curvatures
+    outwardness = outwardness_from_curvature(curvatures)
+    scores = alignments if criterion == "centroid" else outwardness
     excluded = parse_exclude_labels(exclude_values, base)
     flips = decide_flips(scores, exclude_labels=excluded)
 
@@ -337,7 +362,7 @@ def flip_normals_single(graph_file, output_dir, exclude_values=(), min_component
         # criteria disagree; their failure modes are independent, so disagreement
         # is a better "check this one" signal than either confidence alone.
         weak = confidence[cid] < AMBIGUOUS_CONFIDENCE
-        disagrees = (curvatures[cid] > 0) != (alignments[cid] > 0)
+        disagrees = (outwardness[cid] > 0) != (alignments[cid] > 0)
         if (weak or disagrees) and cid not in excluded:
             check_these.append(cid)
         flag = "?" if (weak or disagrees) else " "
@@ -370,6 +395,25 @@ def flip_normals_single(graph_file, output_dir, exclude_values=(), min_component
     print(f"  Saved: {out_base}.gt / .vtp / .csv")
 
 
+def _reverse_winding(graph, flip_mask):
+    """Reverse triangle vertex order wherever the normal was flipped.
+
+    The .vtp written from this graph carries no active VTK NORMALS array (verified:
+    GetCellData().GetNormals() is None), so ChimeraX, Blender and ParaView light the
+    surface from winding order alone. Flipping the stored normal arrays is therefore
+    invisible to them, and leaves the file self-contradictory: the geometry still
+    says one thing and the properties another. Reversing the winding is what makes
+    the flip real to a renderer.
+
+    ``points`` holds each triangle's three corners, so reversing that list reverses
+    the winding; the ``xyz`` centroid is unaffected.
+    """
+    points = graph.vp["points"]
+    for index in np.flatnonzero(flip_mask):
+        corners = list(points[graph.vertex(int(index))])
+        points[graph.vertex(int(index))] = corners[::-1]
+
+
 def _apply_flip_to_graph(graph, flip_mask):
     """Pull every numeric vertex property into numpy, flip it, and write it back."""
     properties, is_vector = {}, {}
@@ -390,6 +434,55 @@ def _apply_flip_to_graph(graph, flip_mask):
         else:
             graph.vp[name].a = values
 
+    # Geometry must agree with the flipped normals, or renderers (which use winding,
+    # not the stored arrays) will light the surface as though nothing changed.
+    if "points" in graph.vp:
+        _reverse_winding(graph, flip_mask)
+
+
+def attach_active_normals(poly, source="n_v"):
+    """Publish `source` as the polydata's active VTK NORMALS, per cell and per point.
+
+    pycurv writes the voted normals as an ordinary cell array named `n_v`, which
+    leaves the polydata with no *active* NORMALS attribute. Renderers then fall back
+    to deriving normals from triangle winding, so the stored orientation has no
+    effect on shading -- the reason a flipped surface still lit the old way in
+    ChimeraX. Designating the array makes the orientation explicit for anything that
+    prefers stored normals, while the reversed winding covers anything that does not.
+
+    Point normals are the area-independent mean of the incident cells' normals,
+    which is what smooth-shading renderers use; cell normals are `n_v` verbatim.
+    Returns True if normals were attached, False if `source` was unavailable.
+    """
+    import vtk
+    from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
+
+    cell_data = poly.GetCellData()
+    array = cell_data.GetArray(source)
+    if array is None or array.GetNumberOfComponents() != 3:
+        return False
+
+    normals = vtk_to_numpy(array).astype(float)
+    cell_data.SetNormals(array)
+
+    if poly.GetPolys() is None or poly.GetNumberOfPolys() == 0:
+        return True
+    conn = vtk_to_numpy(poly.GetPolys().GetConnectivityArray()).reshape(-1, 3)
+    accumulated = np.zeros((poly.GetNumberOfPoints(), 3))
+    for corner in range(3):
+        np.add.at(accumulated, conn[:, corner], normals)
+    lengths = np.linalg.norm(accumulated, axis=1)
+    # A point whose incident normals cancel (or that no triangle uses) has no
+    # meaningful average; leave it as +z rather than dividing by zero.
+    safe = lengths > 0
+    accumulated[safe] /= lengths[safe, None]
+    accumulated[~safe] = (0.0, 0.0, 1.0)
+
+    point_normals = numpy_to_vtk(accumulated, deep=True)
+    point_normals.SetName("Normals")
+    poly.GetPointData().SetNormals(point_normals)
+    return True
+
 
 def _save_graph_outputs(tg, out_base):
     """Save a TriangleGraph as the standard .gt / .vtp / .csv triple."""
@@ -397,7 +490,11 @@ def _save_graph_outputs(tg, out_base):
     from .intradistance_verticality import export_csv
 
     tg.graph.save(f"{out_base}.gt")
-    io.save_vtp(tg.graph_to_triangle_poly(), f"{out_base}.vtp")
+    poly = tg.graph_to_triangle_poly()
+    if not attach_active_normals(poly):
+        print("  NOTE: no n_v array on this surface; the .vtp has no explicit normals "
+              "and renderers will shade it from triangle winding alone.")
+    io.save_vtp(poly, f"{out_base}.vtp")
     export_csv(tg, f"{out_base}.csv")
 
 
@@ -491,7 +588,8 @@ def manual_flip_single(graph_file, labels, output_dir=None):
 @click.option("--criterion", type=click.Choice(["curvature", "centroid"]),
               default="curvature", show_default=True,
               help="How to decide outward. 'curvature' flips until area-weighted "
-                   "mean_curvature_VV is positive (local; works on open sheets). "
+                   "mean_curvature_VV is negative, which is pycurv's sign for an "
+                   "outward normal (local; works on open sheets). "
                    "'centroid' flips until normals point away from the component's "
                    "centre of mass (assumes a star-shaped component; decisive for closed "
                    "compartments, meaningless for sheets). Both are always reported.")
@@ -504,8 +602,8 @@ def flip_normals_cli(configfile, graph_file, label, exclude_values, min_size,
 
     CONFIGFILE: path to config.yml.
 
-    Each connected component is flipped so its area-weighted mean curvature is
-    positive. Check the result in ParaView (docs/normals.md) and re-run with
+    Each connected component is flipped so its normals point outward (area-weighted
+    mean_curvature_VV negative, which is pycurv's sign for an outward normal). Check the result in ParaView (docs/normals.md) and re-run with
     --exclude-labels for components the heuristic gets wrong.
     """
     config = load_config(configfile, require=("work_dir",))

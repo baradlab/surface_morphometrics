@@ -32,6 +32,16 @@ standalone importable library.
   the maximum — negating alone would invert that invariant. `mean_curvature`(`_VV`),
   `shape_index_VV`/`_cat`, `min`/`max_curvature` and the normals follow; `gauss_curvature`
   (`_VV`) and `curvedness_VV` are even in the normal and are deliberately left alone.
+  Orientation follows pycurv's sign convention, in which an outward normal on a convex
+  surface gives *negative* mean curvature — measured on a meshed sphere of radius 24.99 nm
+  whose normals all point outward, where `mean_curvature_VV = -0.0400 = -1/R`. Triangle
+  winding is reversed on flipped components as well: the `.vtp` carries no active VTK
+  `NORMALS` array, so ChimeraX, Blender and ParaView light the surface from winding order,
+  and flipping only the stored arrays would be invisible to them while leaving the file
+  self-contradictory. The oriented `.vtp` additionally publishes explicit normals, which
+  pycurv's output lacks: `n_v` becomes the active cell `NORMALS` attribute and a matching
+  per-point `Normals` array is written for smooth-shading renderers, so a viewer gets the
+  same orientation whether it reads stored normals or derives them from winding.
   Connected components are labelled as part of the step, so it runs straight after
   `pycurv` or `accept_refinement`. Outputs `<base>_oriented.gt`/`.vtp`/`.csv` with
   `component_number` and `normals_flipped` properties. New docs: `docs/normals.md`.
@@ -52,10 +62,10 @@ standalone importable library.
   away from the component's centre of mass (assumes a star-shaped component). Both are
   always reported, along with a confidence, and components are flagged for manual checking
   when curvature cancels out or when the two criteria disagree — their failure modes are
-  independent, so disagreement localizes exactly the components worth inspecting. On a
-  real cristae-rich IMM the two disagree on 24 of 28 components, systematically rather
-  than randomly. The components that actually need correcting are the small, disconnected,
-  tubular ones: a crista still attached to the IMM is part of that component and inherits
+  independent, so disagreement localizes exactly the components worth inspecting. On a real
+  cristae-rich IMM the two agree on 24 of 28 components, and on a closed OMM on 2 of 5;
+  where they differ it is usually a component whose shape breaks the centroid assumption.
+  The components that actually need correcting are the small, disconnected, tubular ones: a crista still attached to the IMM is part of that component and inherits
   its (correct) orientation, while an isolated crista fragment is oriented by its own tube
   geometry and ends up pointing the opposite way.
 
