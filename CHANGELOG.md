@@ -11,6 +11,47 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
 (not the triangle) as the unit of replication.
 
 ### Added
+- Multi-dataset comparisons: a top-level `datasets:` block federates several separately
+  processed runs (each its own `work_dir`) into one comparison, via the new
+  `surface_morphometrics.multidataset.MultiDataset`. Units are namespaced
+  `<dataset>/<tomogram>` (so the nested permutation floor counts tomograms correctly and
+  names may repeat across runs), each dataset carries its own validated `groups:`, and every
+  tomogram gets an implicit `dataset` group. A dataset with no data is an error unless marked
+  `optional: true`. `compare`, `compare_batch` and `variogram` accept such configs.
+- `dataset.PickleDataset` serves a legacy `Experiment` pickle through the `Dataset`
+  interface (a migration path for runs whose CSVs are gone), loading script-written
+  pickles (`__main__.Experiment`) without `__main__` injection; `Dataset.from_work_dir`
+  discovers tomograms from surface CSV names when the segmentation folder has moved.
+- `morphometrics compare_batch study.yml` — runs a config `analyses:` list across the N
+  conditions of a `comparison:` block, at both the per-tomogram summary level (violins,
+  Mann-Whitney / Welch / summary KS) and the pooled-distribution level (permutation test
+  with its floor + cluster CIs), into tidy `summary.csv` / `tests.csv`. Per-analysis
+  `filters`, `statistic`, `ci_statistic`, `distribution_test`, `min_triangles`; `--only`,
+  `--conditions`, `--split-components`, fixed seed. Replaces the bespoke Drp1
+  `stats_grouped.py` driver, whose 5-way output it reproduces exactly.
+- `compare --conditions A B` picks two buckets of a group that has more.
+- `groups:` buckets accept a single glob string, and two explicit forms: `"*"` (every
+  tomogram) and the reserved word `rest` (every tomogram no other bucket in the group
+  claimed; at most one per group).
+- `compare_batch` `comparison.pairs` tests exactly the listed condition pairs -- e.g. a
+  2x2 design comparing treatment vs vehicle within each morphology.
+- `examples/mitochondria/`: the paper's `old_scripts/mitochondria_statistics.py` (974
+  lines) ported to a `compare_batch` study config plus a ~150-line extras script (areas,
+  ER-contact fractions, 2D histograms).
+- `morphometrics variogram config.yml -n F` — opt-in spatial QC of a per-triangle feature:
+  per-surface and per-class pooled semivariograms (3D distance from the CSV, or
+  `--geodesic` on the graph), fitted for correlation length, nugget, sill, structured
+  fraction, drift and N_eff, written to `<feature>_variogram.csv` with per-class plots.
+  Backed by new `spatial_stats.euclidean_semivariogram`, poolable `VariogramSums`,
+  `summarize_variogram_fit`, and a `model=` choice in `fit_correlation_length`
+  (`exponential` default, `gaussian`, or `auto`): an exponential model fits a smooth
+  (neighborhood-averaged) field by zeroing the nugget, the Gaussian one recovers it.
+- `measure_thickness --noise-estimate` — split-half measurement-noise estimate: a sample of
+  triangles (`--noise-samples`, default 5000) is re-fit from two disjoint random halves of
+  its neighborhood, and var(A − B)/4 estimates the noise variance of thickness and offset
+  (plus a MAD-robust version and reliability = 1 − noise/total). Written per surface to
+  `work_dir/thickness_noise.csv` and reported by `variogram`, because the variogram nugget
+  of a neighborhood-averaged field is suppressed and is not a noise floor.
 - `morphometrics compare config.yml -n F -g GROUP` — a spatially-aware treatment
   comparison of one feature between the two conditions of a config `groups:` block, per
   membrane class. Effect size is an area-weighted KS (or `--statistic wasserstein`)
@@ -77,14 +118,23 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
 - Factored the pairwise significance testing out of the violin command into a shared
   `morphometrics_stats.pairwise_tests()`, and rewrote `statistics()` to delegate to it
   (output verified byte-identical for existing callers).
+- `geodesic_semivariogram` accepts a `mask` (filtered subsets; paths still run through the
+  whole surface) and can return its poolable sums.
 
 ### ⚠️ Breaking changes
+- An empty `groups:` bucket (`[]` / `null`) is now an error instead of an implicit
+  "everything else" bucket (unreleased behavior from earlier on this branch): write `rest`
+  for the remainder or `"*"` for every tomogram.
 - `statistics()`'s pairwise CSV renames its KS columns `KStest_Stars` / `KS` / `P_KS`
   to `KS_summary_Stars` / `KS_summary_stat` / `P_KS_summary`, to make explicit that this
   KS compares per-tomogram summary statistics, not pooled triangle distributions. Column
   order is unchanged, so positional readers are unaffected.
 
 ### Fixed
+- `permutation_test`'s `min_possible_p` (the permutation floor) was 2 / C(n, n_a) for
+  every design; that is only right for equal group sizes. For unequal sizes it is
+  1 / C(n, n_a), so the floor was overstated 2x (and `AT FLOOR` flags could trigger on
+  p-values above the true floor). p-values themselves were unaffected.
 - `statistics()` no longer crashes on >12 datasets (color list wrapped) or via a dead
   `except e:` clause.
 - `morphometrics_stats.bootstrap` documented as deprecated for confidence intervals

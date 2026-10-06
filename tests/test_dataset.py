@@ -52,19 +52,47 @@ def test_assign_groups_empty_is_noop():
     assert assign_groups(["TF1", "TE1"], {}) == {"TF1": {}, "TE1": {}}
 
 
-def test_assign_groups_default_bucket_catches_the_rest():
+def test_assign_groups_rest_bucket_catches_the_remainder():
     # "these named tomograms are Positive, everything else is Negative"
-    groups = {"drp1": {"Positive": ["TF1", "TF2"], "Negative": []}}
+    groups = {"drp1": {"Positive": ["TF1", "TF2"], "Negative": "rest"}}
     meta = assign_groups(["TF1", "TF2", "TE1", "UF3"], groups)
     assert meta["TF1"] == {"drp1": "Positive"}
     assert meta["TE1"] == {"drp1": "Negative"}
     assert meta["UF3"] == {"drp1": "Negative"}
 
 
-def test_assign_groups_rejects_two_default_buckets():
-    groups = {"drp1": {"Positive": [], "Negative": []}}
-    with pytest.raises(ValueError, match="more than one default"):
+def test_assign_groups_star_and_single_glob_string():
+    meta = assign_groups(["TF1", "TE1"], {"condition": {"All": "*"},
+                                          "morph": {"F": "?F*", "E": "?E*"}})
+    assert meta["TE1"] == {"condition": "All", "morph": "E"}
+
+
+def test_assign_groups_star_beside_another_bucket_is_ambiguous():
+    # "*" is an ordinary glob, not a remainder -- use `rest` for that
+    with pytest.raises(ValueError, match="matches 2 buckets"):
+        assign_groups(["TF1"], {"c": {"A": ["TF*"], "B": "*"}})
+
+
+@pytest.mark.parametrize("empty", [[], None, ""])
+def test_assign_groups_rejects_empty_bucket(empty):
+    with pytest.raises(ValueError, match=r"is empty.*\"\*\".*rest"):
+        assign_groups(["TF1"], {"c": {"A": ["TF*"], "B": empty}})
+
+
+def test_assign_groups_rejects_two_rest_buckets():
+    groups = {"drp1": {"Positive": "rest", "Negative": "rest"}}
+    with pytest.raises(ValueError, match="more than one `rest`"):
         assign_groups(["TF1"], groups)
+
+
+def test_assign_groups_literal_rest_tomogram_via_list():
+    meta = assign_groups(["rest", "TF1"], {"c": {"A": ["rest"], "B": "rest"}})
+    assert meta == {"rest": {"c": "A"}, "TF1": {"c": "B"}}
+
+
+def test_assign_groups_rejects_non_pattern_spec():
+    with pytest.raises(ValueError, match="expected a list"):
+        assign_groups(["TF1"], {"c": {"A": 3}})
 
 
 # --- construction / selection from config -------------------------------------------

@@ -119,7 +119,12 @@ mesh_refinement:
 #     Vehicle: [TE*, UE*]
 #   morphology:
 #     fragmented: ["?F*"]
-#     elongated:  ["?E*"]
+#     elongated:  rest            # `rest` = every tomogram no other bucket claimed; "*" = every tomogram
+
+# MULTI-DATASET STUDIES (compare / compare_batch / variogram)
+# To compare several separately processed runs, or run a batch of analyses, write a
+# separate study config with `datasets:`, `comparison:` and `analyses:` blocks -- see
+# docs/dataset.md ("Multi-dataset comparisons" and "compare_batch").
 
 
 

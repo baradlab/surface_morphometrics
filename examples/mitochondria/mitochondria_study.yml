@@ -1,0 +1,160 @@
+# The mitochondria ultrastructure analysis (old_scripts/mitochondria_statistics.py, 974
+# lines) as a study config. Every Vehicle-vs-Tg comparison of a per-triangle feature in
+# that script is one entry under `analyses:`; run them all with
+#
+#     morphometrics compare_batch mitochondria_study.yml
+#
+# The outputs that are not feature comparisons (surface areas, ER-contact fractions, 2D
+# histograms, per-tomogram histograms) are in mitochondria_extras.py, which reads this
+# same file.
+
+# --- data ------------------------------------------------------------------------------
+
+classes: [OMM, IMM, ER]
+statistics:
+  cache: true
+  # The old script skipped these by name in most sections (but not in OMM-ER distance or
+  # OMM curvature). Here the exclusion applies everywhere.
+  exclude_tomograms: [UF3, TE1]
+
+# Tomogram names encode the design: 1st letter U/T = untreated/treated, 2nd letter
+# E/F = elongated/fragmented. The old script decoded that with `key[1] == "F"` inside
+# every loop; here it is declared once, per dataset, and validated on load.
+#
+# Each dataset loads from its per-surface CSVs if `work_dir` has them, otherwise from the
+# legacy pickle. Point work_dir at the runs' morphometrics folders to move off pickles.
+datasets:
+  untreated:
+    work_dir: untreated/morphometrics/
+    pickle: untreated.pkl
+    groups:
+      condition: {Vehicle: "*"}
+      morphology: {fragmented: ["?F*"], elongated: rest}
+      arm: {"Veh fragmented": ["?F*"], "Veh elongated": rest}
+  treated:
+    work_dir: treated/morphometrics/
+    pickle: treated.pkl
+    groups:
+      condition: {Tg: "*"}
+      morphology: {fragmented: ["?F*"], elongated: rest}
+      arm: {"Tg fragmented": ["?F*"], "Tg elongated": rest}
+  tggsk:
+    # The cotreatment only appears in the area bar charts and 2D histograms (extras).
+    work_dir: tggsk/morphometrics/
+    pickle: tggsk.pkl
+    optional: true
+    groups:
+      condition: {Tg+GSK: "*"}
+      morphology: {fragmented: ["?F*"], elongated: rest}
+      arm: {"Tg+GSK fragmented": ["?F*"], "Tg+GSK elongated": rest}
+
+# --- the comparison ----------------------------------------------------------------------
+
+# The design is 2x2 (treatment x morphology); treatment is compared WITHIN each
+# morphology, which is what the old 4-column statistics()/ks_statistics() tables held.
+comparison:
+  group: arm
+  conditions:
+    - {name: Veh elongated, short: "Veh-E", color: "#56B4E9"}
+    - {name: Tg elongated,  short: "Tg-E",  color: "#D55E00"}
+    - {name: Veh fragmented, short: "Veh-F", color: "#0072B2"}
+    - {name: Tg fragmented,  short: "Tg-F",  color: "#E69F00"}
+  pairs:
+    - [Veh elongated, Tg elongated]
+    - [Veh fragmented, Tg fragmented]
+  separator_after: 2
+  reps: 5000
+  output: output_final
+
+# --- analyses ----------------------------------------------------------------------------
+# Subcompartments of the IMM by distance to the OMM (the old junction_minimum = 19 nm and
+# junction_maximum = 40 nm):
+#   IBM:      IMM:OMM_dist<19
+#   junction: IMM:OMM_dist>19 + IMM:OMM_dist<40
+#   crista:   IMM:OMM_dist>40
+#
+# `statistic` is the per-tomogram summary for the violin and summary-level tests (the old
+# statistics() call); the pooled-distribution permutation test replaces ks_statistics().
+
+analyses:
+  # Inter-membrane distances
+  - {name: imm_omm_distance, class: OMM, feature: IMM_dist, statistic: peak, range: [5, 25],
+     title: OMM-IMM distance, xlabel: "OMM-IMM distance (nm)"}
+  - {name: omm_er_distance, class: OMM, feature: ER_dist, statistic: peak, range: [5, 40],
+     title: OMM-ER distance, xlabel: "OMM-ER distance (nm)"}
+
+  # Curvedness of the whole IMM and its subcompartments, the OMM, and the ER
+  - {name: imm_curvedness, class: IMM, feature: curvedness_VV, statistic: peak,
+     range: [0, 0.1], title: IMM curvedness, xlabel: "Curvedness (1/nm)"}
+  - {name: ibm_curvedness, class: IMM, feature: curvedness_VV, statistic: peak,
+     range: [0, 0.1], filters: ["IMM:OMM_dist<19"],
+     title: IBM curvedness, xlabel: "Curvedness (1/nm)"}
+  - {name: junction_curvedness, class: IMM, feature: curvedness_VV, statistic: peak,
+     range: [0, 0.1], filters: ["IMM:OMM_dist>19", "IMM:OMM_dist<40"],
+     title: Crista junction curvedness, xlabel: "Curvedness (1/nm)"}
+  - {name: crista_curvedness, class: IMM, feature: curvedness_VV, statistic: peak,
+     range: [0, 0.1], filters: ["IMM:OMM_dist>40"],
+     title: Crista curvedness, xlabel: "Curvedness (1/nm)"}
+  - {name: omm_curvedness, class: OMM, feature: curvedness_VV, statistic: peak,
+     range: [0, 0.1], title: OMM curvedness, xlabel: "Curvedness (1/nm)"}
+  # The old ER section also kept only tomograms whose name ends in "a" (`key[-1] == "a"`).
+  # If that still matters, run this one with  --only er_curvedness  from a copy of the
+  # config with `include_tomograms: ["*a"]` on each dataset.
+  - {name: er_curvedness, class: ER, feature: curvedness_VV, statistic: peak,
+     range: [0, 0.1], title: ER curvedness, xlabel: "Curvedness (1/nm)"}
+
+  # Intra-IMM spacing: nearest (self_dist_min) and far-side (self_dist_far) distance to
+  # the same membrane, for triangles that found a partner (self_id_min != -1).
+  - {name: intra_imm_spacing, class: IMM, feature: self_dist_min, statistic: peak,
+     range: [10, 40], filters: ["IMM:self_id_min!=-1"], title: Intra-IMM spacing}
+  - {name: intra_ibm_spacing, class: IMM, feature: self_dist_min, statistic: peak,
+     range: [10, 40], filters: ["IMM:self_id_min!=-1", "IMM:OMM_dist<19"],
+     title: Intra-IBM spacing}
+  - {name: intra_junction_spacing, class: IMM, feature: self_dist_min, statistic: peak,
+     range: [10, 40], filters: ["IMM:self_id_min!=-1", "IMM:OMM_dist>19", "IMM:OMM_dist<40"],
+     title: Intra-junction spacing}
+  - {name: intra_crista_spacing, class: IMM, feature: self_dist_min, statistic: peak,
+     range: [10, 40], filters: ["IMM:self_id_min!=-1", "IMM:OMM_dist>40"],
+     title: Intra-crista spacing}
+  - {name: inter_imm_spacing, class: IMM, feature: self_dist_far, statistic: peak,
+     range: [20, 200], filters: ["IMM:self_id_min!=-1"], title: Inter-IMM spacing}
+  - {name: inter_ibm_spacing, class: IMM, feature: self_dist_far, statistic: peak,
+     range: [20, 200], filters: ["IMM:self_id_min!=-1", "IMM:OMM_dist<19"],
+     title: Inter-IBM spacing}
+  - {name: inter_junction_spacing, class: IMM, feature: self_dist_far, statistic: peak,
+     range: [20, 200], filters: ["IMM:self_id_min!=-1", "IMM:OMM_dist>19", "IMM:OMM_dist<40"],
+     title: Inter-junction spacing}
+  - {name: inter_crista_spacing, class: IMM, feature: self_dist_far, statistic: peak,
+     range: [20, 200], filters: ["IMM:self_id_min!=-1", "IMM:OMM_dist>40"],
+     title: Inter-crista spacing}
+
+  # Orientation relative to the growth plane. The old script recomputed this from n_v_z;
+  # the pipeline's `verticality` column is the same formula. The question is spread (how
+  # disordered the cristae are), so the per-tomogram summary is the SD -- and since no
+  # location analysis covers this feature, the pooled test is switched back on.
+  - {name: imm_verticality, class: IMM, feature: verticality, statistic: std,
+     distribution_test: true, range: [0, 90], title: IMM verticality, xlabel: "Angle (º)"}
+  - {name: ibm_verticality, class: IMM, feature: verticality, statistic: std,
+     distribution_test: true, range: [0, 90], filters: ["IMM:OMM_dist<19"],
+     title: IBM verticality, xlabel: "Angle (º)"}
+  - {name: junction_verticality, class: IMM, feature: verticality, statistic: std,
+     distribution_test: true, range: [0, 90], filters: ["IMM:OMM_dist>19", "IMM:OMM_dist<40"],
+     title: Junction verticality, xlabel: "Angle (º)"}
+  - {name: crista_verticality, class: IMM, feature: verticality, statistic: std,
+     distribution_test: true, range: [0, 90], filters: ["IMM:OMM_dist>40"],
+     title: Crista verticality, xlabel: "Angle (º)"}
+
+  # Angle between each IMM triangle and its nearest OMM triangle. The old script rebuilt
+  # it from the normals and OMM_neighbor_index; `OMM_orientation` is the same quantity,
+  # written by distances_orientations (relative_orientation: true).
+  - {name: imm_omm_angle, class: IMM, feature: OMM_orientation, statistic: std,
+     distribution_test: true, range: [0, 90], title: IMM-OMM angle, xlabel: "Angle (º)"}
+  - {name: ibm_omm_angle, class: IMM, feature: OMM_orientation, statistic: std,
+     distribution_test: true, range: [0, 90], filters: ["IMM:OMM_dist<19"],
+     title: IBM-OMM angle, xlabel: "Angle (º)"}
+  - {name: junction_omm_angle, class: IMM, feature: OMM_orientation, statistic: std,
+     distribution_test: true, range: [0, 90], filters: ["IMM:OMM_dist>19", "IMM:OMM_dist<40"],
+     title: Junction-OMM angle, xlabel: "Angle (º)"}
+  - {name: crista_omm_angle, class: IMM, feature: OMM_orientation, statistic: std,
+     distribution_test: true, range: [0, 90], filters: ["IMM:OMM_dist>40"],
+     title: Crista-OMM angle, xlabel: "Angle (º)"}

@@ -22,6 +22,7 @@ __author__ = "Benjamin Barad"
 __email__ = "benjamin.barad@gmail.com"
 __license__ = "GPLv3"
 
+import os
 from collections import defaultdict
 
 import click
@@ -59,6 +60,31 @@ def _per_tomogram_pooled(records, label):
     return {tomo: (np.concatenate(vs), np.concatenate(as_)) for tomo, (vs, as_) in buckets.items()}
 
 
+def _group_buckets(ds, group):
+    """Declared bucket names of `group`, in config order ([] if the group is undefined).
+
+    For a multi-dataset this is the union over member datasets; the implicit `dataset`
+    group's buckets are the member names.
+    """
+    members = list(ds.members.values()) if hasattr(ds, "members") else [ds]
+    buckets = []
+    for member in members:
+        for bucket in (member.groups.get(group) or {}):
+            if bucket not in buckets:
+                buckets.append(bucket)
+    if not buckets and hasattr(ds, "members") and group == "dataset":
+        buckets = list(ds.members)
+    return buckets
+
+
+def _available_groups(ds):
+    members = list(ds.members.values()) if hasattr(ds, "members") else [ds]
+    names = ["dataset"] if hasattr(ds, "members") else []
+    for member in members:
+        names.extend(g for g in member.groups if g not in names)
+    return names
+
+
 @click.command(name="compare")
 @click.argument("configfile", type=click.Path(exists=True))
 @click.option("-n", "--feature", required=True,
@@ -79,37 +105,56 @@ def _per_tomogram_pooled(records, label):
                    "tomogram).")
 @click.option("--component-column", default="component_number", show_default=True,
               help="Per-triangle connected-component id column, for --split-components.")
+@click.option("--conditions", nargs=2, default=None,
+              help="The two buckets of GROUP to compare, when it has more than two "
+                   "(e.g. --conditions Tg Vehicle).")
 @click.option("--reps", type=int, default=2000, show_default=True,
               help="Permutation replicates for the p-value.")
 @click.option("--seed", type=int, default=0, show_default=True, help="Permutation RNG seed.")
 @click.option("--output", default=None,
               help="Output CSV path (default: work_dir/<feature>_<group>_compare.csv).")
 def compare_cli(configfile, feature, group, statistic, filters, split_components,
-                component_column, reps, seed, output):
+                component_column, conditions, reps, seed, output):
     """Compare FEATURE between the two conditions of a config GROUP, per membrane class.
 
-    CONFIGFILE: path to config.yml (must contain a `groups:` block defining GROUP).
+    CONFIGFILE: path to config.yml. GROUP is a `groups:` block of the config -- or, for a
+    multi-dataset config (a `datasets:` block), any group defined on its datasets, or
+    `dataset` to compare whole datasets against each other.
     """
-    from .dataset import Dataset
+    from .multidataset import load_for_analysis
     from .surface_filters import parse_filters, describe
     from .spatial_stats import permutation_test, cluster_t_interval
 
-    config = load_config(configfile, require=("seg_dir", "work_dir", "segmentation_values"))
-    if not config.get("groups") or group not in config["groups"]:
+    config = load_config(configfile)
+    multi = bool(config.get("datasets"))
+    if not multi:
+        from .config_utils import require_keys
+        require_keys(config, ("seg_dir", "work_dir", "segmentation_values"), configfile)
+    try:
+        ds = load_for_analysis(config, configfile)   # validates group assignment
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
+    buckets = _group_buckets(ds, group)
+    if not buckets:
         raise click.ClickException(
             f"config has no group '{group}'. Define it under `groups:` in {configfile} "
-            f"(available: {list((config.get('groups') or {}).keys()) or 'none'}).")
-    buckets = list(config["groups"][group])
+            f"(available: {_available_groups(ds) or 'none'}).")
+    if conditions:
+        missing = [c for c in conditions if c not in buckets]
+        if missing:
+            raise click.ClickException(
+                f"--conditions {missing} not in group '{group}' (buckets: {buckets}).")
+        buckets = list(conditions)
     if len(buckets) != 2:
         raise click.ClickException(
             f"group '{group}' has {len(buckets)} buckets {buckets}; compare needs exactly "
-            "two conditions. Split the comparison or add an `exclude_tomograms` list.")
+            "two conditions. Pick two with --conditions, or use `compare_batch` for an "
+            "N-way comparison.")
 
     stats_cfg = config.get("statistics", {}) or {}
     config_filters = stats_cfg.get("filters", []) if isinstance(stats_cfg, dict) else []
     clauses = parse_filters(list(config_filters) + list(filters))
 
-    ds = Dataset.from_config(config)          # validates group assignment, enables cache
     records, diag = ds.collect_feature(
         feature, split_components=split_components, component_column=component_column,
         filters=clauses)
@@ -132,21 +177,28 @@ def compare_cli(configfile, feature, group, statistic, filters, split_components
     rows = []
     for label in labels_present:
         values, areas, strata = _units_for_label(records, label)
-        conditions = [ds.metadata(tomo).get(group) for tomo in strata]
-        present = sorted(set(conditions))
+        conds = [ds.metadata(tomo).get(group) for tomo in strata]
+        keep = [i for i, c in enumerate(conds) if c in buckets]
+        values = [values[i] for i in keep]
+        areas = [areas[i] for i in keep]
+        strata = [strata[i] for i in keep]
+        conds = [conds[i] for i in keep]
+        present = sorted(set(conds))
         if len(present) < 2:
             print(f"\n  {label}: only condition {present} present -- skipping.")
             continue
 
         perm = permutation_test(
-            values, conditions, statistic=statistic, unit_weights=areas,
+            values, conds, statistic=statistic, unit_weights=areas,
             strata=(strata if split_components else None), reps=reps, seed=seed)
 
         # Cluster CIs: one area-weighted mean per tomogram, per condition.
         pooled = _per_tomogram_pooled(records, label)
         by_condition = defaultdict(list)
         for tomo, (v, a) in pooled.items():
-            by_condition[ds.metadata(tomo).get(group)].append((v, a))
+            cond = ds.metadata(tomo).get(group)
+            if cond in buckets:
+                by_condition[cond].append((v, a))
         cis = {}
         for cond in (perm["condition_a"], perm["condition_b"]):
             units = by_condition.get(cond, [])
@@ -187,7 +239,8 @@ def compare_cli(configfile, feature, group, statistic, filters, split_components
     if not rows:
         raise click.ClickException(
             "no class had both conditions present; nothing to compare.")
-    out_csv = output or f"{config['work_dir']}{feature}_{group}_compare.csv"
+    out_dir = config.get("work_dir") or (os.path.dirname(os.path.abspath(configfile)) + "/")
+    out_csv = output or f"{out_dir}{feature}_{group}_compare.csv"
     if not out_csv.endswith(".csv"):
         out_csv += ".csv"
     pd.DataFrame(rows).to_csv(out_csv, index=False)

@@ -25,6 +25,8 @@ Two defensible routes are provided.
   * kish_neff(areas)                     -- (Σw)²/Σw², the NO-correlation upper bound
   * neff_from_neighbors(n_tri, avg_nbr)  -- n_triangles / pycurv's avg_num_neighbors
   * geodesic_semivariogram(...)  -- γ(h) over geodesic distance on the triangle graph
+  * euclidean_semivariogram(...) -- γ(h) over 3D distance, from the per-triangle CSV only
+                                    (VariogramSums pools either across surfaces)
   * fit_correlation_length(...)  -- fit γ(h) = c0 + c1(1 - e^{-h/ℓ}) + c2 h², so the
                                     smooth non-stationary drift (c2 h²) is modelled
                                     rather than mistaken for correlation. Returns ℓ.
@@ -91,9 +93,70 @@ def neff_from_correlation_length(total_area, ell):
 # Geodesic semivariogram
 # ---------------------------------------------------------------------------
 
+class VariogramSums:
+    """Running area-weighted increment sums per lag bin, poolable across surfaces.
+
+    A semivariogram estimate is a ratio of per-bin sums, so the sums from several
+    surfaces (pairs taken WITHIN each surface only) add up to a pooled estimate --
+    more stable than any one surface, without inventing cross-surface pairs.
+    """
+
+    def __init__(self, max_h=60.0, n_bins=30, robust=True):
+        self.max_h = float(max_h)
+        self.n_bins = int(n_bins)
+        self.robust = bool(robust)
+        self.edges = np.linspace(0.0, self.max_h, self.n_bins + 1)
+        self.acc = np.zeros(self.n_bins)
+        self.wsum = np.zeros(self.n_bins)
+        self.cnt = np.zeros(self.n_bins)
+
+    def add(self, seed_value, seed_area, d, target_values, target_areas):
+        """Add the increments between one seed and its targets at distances `d`."""
+        m = np.isfinite(d) & (d > 0) & (d <= self.max_h) & np.isfinite(target_values)
+        if not m.any():
+            return
+        idx = np.clip(np.digitize(d[m], self.edges) - 1, 0, self.n_bins - 1)
+        delta = seed_value - target_values[m]
+        w = seed_area * target_areas[m]
+        # Robust: accumulate mean(|Δ|^0.5); classical: mean(Δ²)/2. Both area-weighted.
+        contrib = np.sqrt(np.abs(delta)) if self.robust else 0.5 * delta ** 2
+        np.add.at(self.acc, idx, w * contrib)
+        np.add.at(self.wsum, idx, w)
+        np.add.at(self.cnt, idx, 1.0)
+
+    def __iadd__(self, other):
+        if (other.n_bins, other.max_h, other.robust) != (self.n_bins, self.max_h, self.robust):
+            raise ValueError("can only pool VariogramSums with identical binning")
+        self.acc += other.acc
+        self.wsum += other.wsum
+        self.cnt += other.cnt
+        return self
+
+    def result(self, min_pairs=30):
+        """(h_centers, gamma, counts) for bins with at least `min_pairs` pairs."""
+        ok = self.cnt >= min_pairs
+        centers = 0.5 * (self.edges[:-1] + self.edges[1:])
+        mean = np.divide(self.acc, self.wsum, out=np.zeros_like(self.acc),
+                         where=self.wsum > 0)
+        if self.robust:
+            # Cressie–Hawkins: γ = 0.5 * mean(|Δ|^0.5)^4 / (0.457 + 0.494/N + 0.045/N²)
+            N = np.maximum(self.cnt, 1)
+            gamma = 0.5 * mean ** 4 / (0.457 + 0.494 / N + 0.045 / N ** 2)
+        else:
+            gamma = mean
+        return centers[ok], gamma[ok], self.cnt[ok]
+
+
+def _seed_indices(n, mask, n_seeds, rng):
+    candidates = np.flatnonzero(mask) if mask is not None else np.arange(n)
+    if len(candidates) == 0:
+        return candidates
+    return rng.choice(candidates, size=min(n_seeds, len(candidates)), replace=False)
+
+
 def geodesic_semivariogram(graph, values, weights_ep="distance", areas=None,
                            max_h=60.0, n_bins=30, n_seeds=200, robust=True,
-                           min_pairs=30, seed=0):
+                           min_pairs=30, seed=0, mask=None, return_sums=False):
     """Empirical semivariogram γ(h) over geodesic distance on a triangle graph.
 
     Parameters
@@ -114,10 +177,15 @@ def geodesic_semivariogram(graph, values, weights_ep="distance", areas=None,
         Cressie–Hawkins robust estimator (default) vs the classical Matheron mean.
     min_pairs : int
         Drop lag bins with fewer than this many pairs.
+    mask : (n,) bool array or None
+        Only triangles where True act as seeds or targets (e.g. a filtered subset). Paths
+        still run through masked-out triangles: distance is along the whole surface.
+    return_sums : bool
+        Also return the poolable :class:`VariogramSums`.
 
     Returns
     -------
-    (h_centers, gamma, counts) for bins that met `min_pairs`.
+    (h_centers, gamma, counts) for bins that met `min_pairs` (plus the sums if asked).
     """
     from graph_tool.topology import shortest_distance
 
@@ -128,39 +196,80 @@ def geodesic_semivariogram(graph, values, weights_ep="distance", areas=None,
     areas = np.asarray(areas, dtype=float)
     rng = np.random.default_rng(seed)
     wt = graph.ep[weights_ep]
+    target_values = values if mask is None else np.where(mask, values, np.nan)
 
-    edges = np.linspace(0.0, max_h, n_bins + 1)
-    # Accumulate per bin. For the robust estimator we accumulate mean(|Δ|^0.5); for the
-    # classical one, mean(Δ²)/2. Both are area-weighted.
-    wsum = np.zeros(n_bins)
-    acc = np.zeros(n_bins)
-    cnt = np.zeros(n_bins)
-
-    seeds = rng.choice(n, size=min(n_seeds, n), replace=False)
-    for s in seeds:
+    sums = VariogramSums(max_h, n_bins, robust)
+    for s in _seed_indices(n, mask, n_seeds, rng):
         d = shortest_distance(graph, source=graph.vertex(int(s)), weights=wt,
                               max_dist=max_h).get_array()
-        m = np.isfinite(d) & (d > 0) & (d <= max_h)
-        if not m.any():
-            continue
-        idx = np.clip(np.digitize(d[m], edges) - 1, 0, n_bins - 1)
-        delta = values[int(s)] - values[m]
-        w = areas[int(s)] * areas[m]
-        contrib = np.sqrt(np.abs(delta)) if robust else 0.5 * delta ** 2
-        np.add.at(acc, idx, w * contrib)
-        np.add.at(wsum, idx, w)
-        np.add.at(cnt, idx, 1.0)
+        sums.add(values[int(s)], areas[int(s)], d, target_values, areas)
+    out = sums.result(min_pairs)
+    return (*out, sums) if return_sums else out
 
-    ok = cnt >= min_pairs
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    mean = np.divide(acc, wsum, out=np.zeros_like(acc), where=wsum > 0)
-    if robust:
-        # Cressie–Hawkins: γ = 0.5 * mean(|Δ|^0.5)^4 / (0.457 + 0.494/N + 0.045/N²)
-        N = np.maximum(cnt, 1)
-        gamma = 0.5 * mean ** 4 / (0.457 + 0.494 / N + 0.045 / N ** 2)
-    else:
-        gamma = mean
-    return centers[ok], gamma[ok], cnt[ok]
+
+def euclidean_semivariogram(xyz, values, areas=None, max_h=60.0, n_bins=30,
+                            n_seeds=200, robust=True, min_pairs=30, seed=0, mask=None,
+                            return_sums=False):
+    """Empirical semivariogram γ(h) over straight-line (3D) distance between triangles.
+
+    Needs only the per-triangle CSV (`xyz_x/y/z` centers), so it runs on any quantified
+    surface without graph-tool. Euclidean separation underestimates the along-surface
+    (geodesic) separation where the membrane folds back on itself -- two cristae a few
+    nm apart in 3D are far apart on the surface -- so keep `max_h` modest on highly
+    curved surfaces, or use :func:`geodesic_semivariogram`. Same arguments and return
+    as the geodesic version, with `xyz` an (n, 3) array instead of a graph.
+    """
+    from scipy.spatial import cKDTree
+
+    xyz = np.asarray(xyz, dtype=float)
+    values = np.asarray(values, dtype=float)
+    n = len(values)
+    if areas is None:
+        areas = np.ones(n)
+    areas = np.asarray(areas, dtype=float)
+    rng = np.random.default_rng(seed)
+    keep = np.ones(n, dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
+    keep = keep & np.isfinite(values) & np.all(np.isfinite(xyz), axis=1)
+    kept = np.flatnonzero(keep)
+    sums = VariogramSums(max_h, n_bins, robust)
+    if len(kept) >= 2:
+        tree = cKDTree(xyz[kept])
+        seeds = _seed_indices(len(kept), None, n_seeds, rng)
+        neighbors = tree.query_ball_point(xyz[kept[seeds]], r=max_h)
+        for s, nbr in zip(seeds, neighbors):
+            nbr = np.asarray(nbr, dtype=int)
+            gi = kept[nbr]
+            d = np.linalg.norm(xyz[gi] - xyz[kept[s]], axis=1)
+            sums.add(values[kept[s]], areas[kept[s]], d, values[gi], areas[gi])
+    out = sums.result(min_pairs)
+    return (*out, sums) if return_sums else out
+
+
+def summarize_variogram_fit(fit, variance=None, total_area=None):
+    """Interpretable quantities from a :func:`fit_correlation_length` result.
+
+    * `structured_fraction` = sill / (nugget + sill): the share of short-range
+      variability that is spatially structured rather than nugget (white) variance.
+    * `neff` = A / (2πℓ²) when the area is given and ℓ is identifiable.
+    * `variance` (the field's area-weighted variance) is echoed for comparison: for a
+      stationary field nugget + sill ≈ variance; a large gap means drift dominates.
+
+    The nugget of a NEIGHBORHOOD-AVERAGED field (curvature over radius_hit, thickness
+    over average_radius) is artificially suppressed -- neighbors share their averaging
+    windows -- so it is NOT a measurement-noise floor. Use a split-half noise estimate
+    (`measure_thickness --noise-estimate`) for that.
+    """
+    nugget, sill, ell = fit.get("nugget", np.nan), fit.get("sill", np.nan), fit.get("ell", np.nan)
+    total = nugget + sill
+    out = {"nugget": nugget, "sill": sill, "ell": ell,
+           "ell_stderr": fit.get("ell_stderr", np.nan), "drift": fit.get("drift", np.nan),
+           "ok": bool(fit.get("ok", False)), "model": fit.get("model", "exponential"),
+           "structured_fraction": float(sill / total) if total > 0 else np.nan,
+           "variance": np.nan if variance is None else float(variance),
+           "neff": np.nan}
+    if total_area is not None and out["ok"] and ell > 0:
+        out["neff"] = neff_from_correlation_length(total_area, ell)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -172,15 +281,42 @@ def _variogram_model(h, c0, c1, ell, c2):
     return c0 + c1 * (1.0 - np.exp(-h / ell)) + c2 * h ** 2
 
 
-def fit_correlation_length(h, gamma, counts=None, ell0=None):
-    """Fit γ(h) = c0 + c1(1 - e^{-h/ℓ}) + c2 h² and return the correlation length ℓ.
+def _variogram_model_gaussian(h, c0, c1, ell, c2):
+    """Nested model with a Gaussian (smooth, parabolic-at-origin) correlated component.
+
+    Neighborhood-averaged fields (curvature, thickness) are smooth at short range, which
+    an exponential model can only mimic by trading the nugget away; the Gaussian form
+    keeps the nugget estimate honest for them. Same integral range 2πℓ².
+    """
+    return c0 + c1 * (1.0 - np.exp(-h ** 2 / (2.0 * ell ** 2))) + c2 * h ** 2
+
+
+VARIOGRAM_MODELS = {"exponential": _variogram_model, "gaussian": _variogram_model_gaussian}
+
+
+def fit_correlation_length(h, gamma, counts=None, ell0=None, model="exponential"):
+    """Fit γ(h) = c0 + c1(1 - ρ(h; ℓ)) + c2 h² and return the correlation length ℓ.
 
     The c2 h² term absorbs a smooth non-stationary drift, so ℓ reflects only the
     short-range (stationary) structure — the whole point of the nested model.
 
-    Returns a dict: ell, ell_stderr, sill (c1), nugget (c0), drift (c2), params, and
-    `ok` (False if the fit failed or ℓ is not identifiable).
+    `model` picks the correlated component: "exponential" (ρ = e^{-h/ℓ}, the default),
+    "gaussian" (ρ = e^{-h²/2ℓ²}, for fields that are smooth at short range), or "auto"
+    (fit both, keep the lower weighted residual -- they have the same parameter count).
+
+    Returns a dict: ell, ell_stderr, sill (c1), nugget (c0), drift (c2), params, model,
+    and `ok` (False if the fit failed or ℓ is not identifiable).
     """
+    if model == "auto":
+        fits = [fit_correlation_length(h, gamma, counts, ell0, m)
+                for m in ("exponential", "gaussian")]
+        fits = [f for f in fits if f["params"] is not None]
+        if not fits:
+            return fit_correlation_length(h, gamma, counts, ell0, "exponential")
+        return min(fits, key=lambda f: f["wsse"])
+    if model not in VARIOGRAM_MODELS:
+        raise ValueError(f"model must be one of {tuple(VARIOGRAM_MODELS)} or 'auto'")
+    model_fn = VARIOGRAM_MODELS[model]
     from scipy.optimize import curve_fit
 
     h = np.asarray(h, dtype=float)
@@ -188,7 +324,8 @@ def fit_correlation_length(h, gamma, counts=None, ell0=None):
     good = np.isfinite(h) & np.isfinite(gamma)
     h, gamma = h[good], gamma[good]
     result = {"ell": np.nan, "ell_stderr": np.nan, "sill": np.nan,
-              "nugget": np.nan, "drift": np.nan, "params": None, "ok": False}
+              "nugget": np.nan, "drift": np.nan, "params": None, "ok": False,
+              "model": model, "wsse": np.inf}
     if len(h) < 5:
         return result
 
@@ -205,12 +342,14 @@ def fit_correlation_length(h, gamma, counts=None, ell0=None):
         counts = np.asarray(counts, dtype=float)[good]
         sigma = 1.0 / np.sqrt(np.maximum(counts, 1.0))   # more pairs -> more weight
     try:
-        popt, pcov = curve_fit(_variogram_model, h, gamma, p0=p0, bounds=bounds,
+        popt, pcov = curve_fit(model_fn, h, gamma, p0=p0, bounds=bounds,
                                sigma=sigma, maxfev=20000)
     except (RuntimeError, ValueError):
         return result
     c0, c1, ell, c2 = popt
     perr = np.sqrt(np.diag(pcov)) if np.all(np.isfinite(pcov)) else [np.nan] * 4
+    resid = (gamma - model_fn(h, *popt)) / (sigma if sigma is not None else 1.0)
+    result["wsse"] = float(np.sum(resid ** 2))
     result.update(ell=float(ell), ell_stderr=float(perr[2]), sill=float(c1),
                   nugget=float(c0), drift=float(c2), params=tuple(map(float, popt)),
                   ok=bool(np.isfinite(ell) and ell < 0.99 * h.max() and c1 > 0))
@@ -370,7 +509,10 @@ def permutation_test(unit_values, unit_conditions, statistic="ks",
     See :func:`_shared_grid` for why the resulting statistic stays a valid test.
 
     Returns a dict: statistic, observed, p_value, condition_a/b, n_units_a/b,
-    n_blocks_a/b, reps, min_possible_p (= 2 / C(n_blocks, n_blocks_a)).
+    n_blocks_a/b, reps, min_possible_p -- the smallest p-value the design can produce:
+    1 / C(n_blocks, n_blocks_a), or 2 / C(...) when the two conditions have the same
+    number of blocks (then swapping the labels gives the same symmetric statistic, so
+    the observed split always has a twin).
     """
     from math import comb
 
@@ -450,7 +592,8 @@ def permutation_test(unit_values, unit_conditions, statistic="ks",
         "n_units_b": sum(1 for c in conditions if c == cb),
         "n_blocks_a": n_blocks_a, "n_blocks_b": len(blocks_b),
         "reps": reps,
-        "min_possible_p": 2.0 / comb(len(all_blocks), n_blocks_a),
+        "min_possible_p": (2.0 if n_blocks_a == len(blocks_b) else 1.0)
+                          / comb(len(all_blocks), n_blocks_a),
     }
 
 

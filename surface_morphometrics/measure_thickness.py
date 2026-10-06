@@ -149,7 +149,76 @@ def _global_bilayer_prior(thickness_set, x):
     return (c - half, w, c + half, w)
 
 
-def process_single_surface(filename, average_radius, output_dir):
+def split_half_neighbors(distances, neighbor_indices, rows, half_labels):
+    """Neighbor tables for two disjoint halves of each sampled triangle's neighborhood.
+
+    `distances` / `neighbor_indices` are cKDTree.query outputs (missing neighbors have
+    distance inf and index n). `rows` selects the sampled triangles; `half_labels` (n,)
+    assigns every triangle of the surface to half 0 or 1 once, so the two halves of
+    every neighborhood are disjoint sets of density profiles. Returns
+    (dist_a, idx_a, dist_b, idx_b) restricted to `rows`, with the other half's
+    neighbors masked to inf -- directly usable by the thickness fit workers.
+    """
+    d = distances[rows]
+    idx = neighbor_indices[rows]
+    n = len(half_labels)
+    valid = np.isfinite(d) & (idx < n)
+    half = np.where(valid, half_labels[np.minimum(idx, n - 1)], -1)
+    dist_a = np.where(half == 0, d, np.inf)
+    dist_b = np.where(half == 1, d, np.inf)
+    return dist_a, idx, dist_b, idx
+
+
+def split_half_noise(est_a, est_b, full_values, full_weights=None):
+    """Measurement-noise variance of a neighborhood fit from two half-neighborhood fits.
+
+    Each half averages ~half the profiles, so its noise variance is ~2x the full fit's;
+    the two halves are independent, so var(A - B) = 4 * noise_var(full). Returns a dict
+    with the classical and a MAD-based robust estimate (fits throw occasional outliers),
+    the field's total (area-weighted) variance, and the reliability
+    1 - noise_var / total_var -- the fraction of the field's variance that is signal.
+
+    Caveats: density profiles of adjacent triangles sample overlapping voxels, so the
+    halves are not perfectly independent and the noise is somewhat underestimated; only
+    triangles where both halves (and the full fit) succeeded contribute.
+    """
+    a, b = np.asarray(est_a, dtype=float), np.asarray(est_b, dtype=float)
+    both = np.isfinite(a) & np.isfinite(b)
+    diff = a[both] - b[both]
+    full = np.asarray(full_values, dtype=float)
+    w = np.ones_like(full) if full_weights is None else np.asarray(full_weights, dtype=float)
+    fm = np.isfinite(full) & np.isfinite(w) & (w > 0)
+    out = {"n_sampled": int(len(a)), "n_both": int(both.sum()),
+           "noise_var": np.nan, "noise_var_robust": np.nan, "total_var": np.nan,
+           "reliability": np.nan, "reliability_robust": np.nan}
+    if fm.sum() > 1:
+        mu = np.average(full[fm], weights=w[fm])
+        out["total_var"] = float(np.average((full[fm] - mu) ** 2, weights=w[fm]))
+    if len(diff) >= 10:
+        out["noise_var"] = float(np.var(diff, ddof=1) / 4.0)
+        mad = np.median(np.abs(diff - np.median(diff)))
+        out["noise_var_robust"] = float((1.4826 * mad) ** 2 / 4.0)
+        if out["total_var"] > 0:
+            out["reliability"] = float(1.0 - out["noise_var"] / out["total_var"])
+            out["reliability_robust"] = float(1.0 - out["noise_var_robust"] / out["total_var"])
+    return out
+
+
+def _fit_rows(thickness_arr, distances, neighbor_indices, x, global_fit_params, n_workers):
+    """Run the per-triangle dual-Gaussian fit over every row of the given tables."""
+    n = len(distances)
+    chunk_size = max(50, n // (n_workers * 4))
+    chunks = [list(range(i, min(i + chunk_size, n))) for i in range(0, n, chunk_size)]
+    with mp.Pool(n_workers, initializer=init_worker,
+                 initargs=(thickness_arr, distances, neighbor_indices, x,
+                           False, None, False, global_fit_params)) as pool:
+        results = [r for chunk in pool.imap(fit_triangle_chunk, chunks) for r in chunk]
+    return (np.array([r[0] for r in results], dtype=float),
+            np.array([r[1] for r in results], dtype=float))
+
+
+def process_single_surface(filename, average_radius, output_dir, noise_samples=0,
+                           noise_seed=0):
     """
     Process a single thickness sampling file: compute per-triangle thickness,
     generate plots, and write the thickness back into the surface graph/.vtp/.csv
@@ -163,6 +232,12 @@ def process_single_surface(filename, average_radius, output_dir):
         Radius for local averaging in thickness calculations
     output_dir : str
         Directory for output files
+    noise_samples : int
+        If > 0, also run a split-half noise estimate on this many randomly chosen
+        triangles (see :func:`split_half_noise`); the result is returned under
+        ``component_info['noise']``. Costs ~2 extra fits per sampled triangle.
+    noise_seed : int
+        RNG seed for the half assignment and triangle sample.
 
     Returns
     -------
@@ -257,6 +332,32 @@ def process_single_surface(filename, average_radius, output_dir):
     per_triangle_offset = [r[1] for r in results]
     per_triangle_resolution = [r[2] for r in results]
 
+    noise = None
+    if noise_samples and noise_samples > 0:
+        rng = np.random.default_rng(noise_seed)
+        rows = np.sort(rng.choice(n_triangles, size=min(int(noise_samples), n_triangles),
+                                  replace=False))
+        half_labels = rng.integers(0, 2, n_triangles)
+        dist_a, idx_a, dist_b, idx_b = split_half_neighbors(
+            distances, neighbor_indices, rows, half_labels)
+        print(f"  Split-half noise estimate on {len(rows)} triangles...")
+        thick_a, off_a = _fit_rows(thickness_arr, dist_a, idx_a, x, global_fit_params,
+                                   n_workers)
+        thick_b, off_b = _fit_rows(thickness_arr, dist_b, idx_b, x, global_fit_params,
+                                   n_workers)
+        full_t = np.asarray(per_surface_thickness, dtype=float)
+        # Offsets are reported as 0 where the fit failed; mark those missing.
+        off_a = np.where(np.isfinite(thick_a), off_a, np.nan)
+        off_b = np.where(np.isfinite(thick_b), off_b, np.nan)
+        full_o = np.where(np.isfinite(full_t), np.asarray(per_triangle_offset, float), np.nan)
+        noise = {"thickness": split_half_noise(thick_a, thick_b, full_t, areas),
+                 "offset": split_half_noise(off_a, off_b, full_o, areas)}
+        for name, res in noise.items():
+            print(f"    {name}: noise SD {np.sqrt(res['noise_var']):.3f} nm "
+                  f"(robust {np.sqrt(res['noise_var_robust']):.3f}), field SD "
+                  f"{np.sqrt(res['total_var']):.3f} nm, reliability "
+                  f"{res['reliability']:.2f} ({res['n_both']}/{res['n_sampled']} paired)")
+
     # Plot a sample of profiles for visualization
     for i in range(0, n_triangles, 5000):
         valid_mask = distances[i] != np.inf
@@ -344,13 +445,28 @@ def process_single_surface(filename, average_radius, output_dir):
         'rad_std': rad_std,
         'width': width,
         'p3': p3,
-        'avg': avg
+        'avg': avg,
+        'noise': noise,
     }
 
     return component_info, per_surface_thickness, areas/np.sum(areas), width, x, fig2, ax2
 
 
-def run_measure_thickness(config, output_dir=None):
+NOISE_CSV = "thickness_noise.csv"
+
+
+def write_noise_table(rows, path):
+    """Upsert per-surface split-half noise rows into `path` (keyed by `surface`)."""
+    new = pd.DataFrame(rows)
+    if os.path.isfile(path):
+        old = pd.read_csv(path)
+        old = old[~old["surface"].isin(new["surface"])]
+        new = pd.concat([old, new], ignore_index=True)
+    new.to_csv(path, index=False)
+    return path
+
+
+def run_measure_thickness(config, output_dir=None, noise_samples=0, noise_seed=0):
     """
     Main function to run thickness plotting and analysis.
 
@@ -360,6 +476,9 @@ def run_measure_thickness(config, output_dir=None):
         Configuration dictionary loaded from config.yml
     output_dir : str or None
         Output directory for plots (defaults to work_dir)
+    noise_samples, noise_seed :
+        Split-half noise estimate settings (off when noise_samples == 0); the per-surface
+        results are written to ``thickness_noise.csv`` in work_dir.
     """
     # Get settings from config
     work_dir = config.get("work_dir", config.get("seg_dir", "./"))
@@ -402,6 +521,7 @@ def run_measure_thickness(config, output_dir=None):
     thickness_measurements = {component: [] for component in components}
     area_measurements = {component: [] for component in components}
     widths = {component: [] for component in components}
+    noise_rows = []
 
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
@@ -418,7 +538,15 @@ def run_measure_thickness(config, output_dir=None):
 
             for index, filename in enumerate(filenames[component]):
                 info, per_surface_thickness, norm_areas, width, x, fig2, ax2 = \
-                    process_single_surface(filename, average_radius, output_dir)
+                    process_single_surface(filename, average_radius, output_dir,
+                                           noise_samples=noise_samples,
+                                           noise_seed=noise_seed)
+                if info.get('noise'):
+                    row = {"surface": info['tsname'], "component": component,
+                           "average_radius": average_radius}
+                    for qty, res in info['noise'].items():
+                        row.update({f"{qty}_{k}": v for k, v in res.items()})
+                    noise_rows.append(row)
 
                 thickness_measurements[component].extend(per_surface_thickness)
                 area_measurements[component].extend(norm_areas)
@@ -498,6 +626,10 @@ def run_measure_thickness(config, output_dir=None):
         histogram(data=thickness_data, areas=area_data,
                   labels=labels_with_data, title="Thickness Comparison", xlabel="Thickness (nm)")
 
+    if noise_rows:
+        path = write_noise_table(noise_rows, os.path.join(work_dir, NOISE_CSV))
+        print(f"Split-half noise estimates written to {path}")
+
     print(f"\nOutput files written to {output_dir}")
 
 
@@ -507,7 +639,16 @@ def run_measure_thickness(config, output_dir=None):
               help='Output directory for plots (defaults to work_dir from config)')
 @click.option('--average_radius', type=float, default=None,
               help='Radius for local averaging (overrides config)')
-def measure_thickness_cli(configfile, output, average_radius):
+@click.option('--noise-estimate', 'noise_estimate', is_flag=True, default=False,
+              help='Also estimate per-surface measurement noise of thickness/offset by '
+                   'fitting each sampled triangle from two disjoint random halves of its '
+                   'neighborhood (var(A-B)/4). Writes thickness_noise.csv to work_dir.')
+@click.option('--noise-samples', type=int, default=5000, show_default=True,
+              help='Triangles per surface used for --noise-estimate.')
+@click.option('--noise-seed', type=int, default=0, show_default=True,
+              help='RNG seed for --noise-estimate.')
+def measure_thickness_cli(configfile, output, average_radius, noise_estimate,
+                          noise_samples, noise_seed):
     """
     Measure membrane thickness from density sampling data.
 
@@ -525,7 +666,9 @@ def measure_thickness_cli(configfile, output, average_radius):
             config["thickness_measurements"] = {}
         config["thickness_measurements"]["average_radius"] = average_radius
 
-    run_measure_thickness(config, output_dir=output)
+    run_measure_thickness(config, output_dir=output,
+                          noise_samples=noise_samples if noise_estimate else 0,
+                          noise_seed=noise_seed)
 
 
 if __name__ == "__main__":

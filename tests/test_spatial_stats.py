@@ -249,3 +249,12 @@ def test_cluster_t_interval_mechanics():
     assert res["unit_values"] == [1.0, 2.0, 3.0, 4.0, 5.0]
     with pytest.raises(ValueError):
         ss.cluster_t_interval([np.arange(3)])                    # need >= 2 units
+
+
+def test_permutation_floor_unequal_groups_is_not_doubled():
+    rng = np.random.default_rng(0)
+    vals = [rng.normal(i < 3, 0.1, 50) for i in range(7)]     # 3 vs 4, fully separated
+    conds = ["a"] * 3 + ["b"] * 4
+    res = ss.permutation_test(vals, conds, reps=4000, seed=1)
+    assert res["min_possible_p"] == pytest.approx(1 / 35)      # C(7,3) = 35
+    assert res["p_value"] == pytest.approx(1 / 35, abs=0.01)   # attains it

@@ -13,7 +13,7 @@ Everything is driven by a single `morphometrics` command plus a `config.yml` fil
 
 📊 **[Statistics & Visualization](docs/statistics.md)** — how the distribution-comparison tools are organized and why (unit of replication, permutation tests, effective-N, plots).
 
-🗂️ **[Datasets, filtering & grouped comparisons](docs/dataset.md)** — filter triangles (e.g. cristae), select and group tomograms, run `morphometrics compare`, and drive the stats tools from the `Dataset` API.
+🗂️ **[Datasets, filtering & grouped comparisons](docs/dataset.md)** — filter triangles (e.g. cristae), select and group tomograms, combine several runs, run `morphometrics compare` / `compare_batch`, and drive the stats tools from the `Dataset` API.
 
 ## Contents
 - [Installation](#installation)
@@ -170,6 +170,14 @@ After the pipeline, per-triangle quantifications live in the `.gt` graphs, `.vtp
 The `stats` command (step 6) assembles an Experiment pickle across all tomograms in your data folder; from there, analysis is done in pandas (the `Experiment`/`Tomogram` classes and helpers in `surface_morphometrics.morphometrics_stats`). Quick single-file plots:
 - `morphometrics histogram filename.csv -n feature` — area-weighted histogram of one feature.
 - `morphometrics hist2d filename.csv -n1 feature1 -n2 feature2` — area-weighted 2D histogram of two features.
+
+Cross-tomogram statistics read the per-surface CSVs directly (lazily, with an optional parquet cache), so no pickle is needed:
+- `morphometrics violin config.yml -n feature` — one violin per membrane class, one point per tomogram (or organelle).
+- `morphometrics compare config.yml -n feature -g condition` — two-condition comparison whose p-value treats the tomogram as the unit (permutation test + cluster CIs), driven by a config `groups:` block.
+- `morphometrics compare_batch study.yml` — a list of analyses across N conditions, at both the per-tomogram and pooled-distribution levels; works across several separately processed runs via a `datasets:` block.
+- `morphometrics variogram config.yml -n feature` — spatial QC: correlation length, nugget/sill, and (with `measure_thickness --noise-estimate`) split-half measurement noise.
+
+See [docs/statistics.md](docs/statistics.md) and [docs/dataset.md](docs/dataset.md).
 
 Paper-specific analyses (e.g. `old_scripts/mitochondria_statistics.py`, which generated every plot/statistic in the preprint) live in `old_scripts/` and are run directly with `python` from the repo root.
 

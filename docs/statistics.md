@@ -17,6 +17,8 @@ intuition (the numbers below are from those simulations; see
 | Compare two **full distributions** (e.g. treatment vs control) | `spatial_stats.permutation_test(...)` | tomogram (or organelle, nested via `strata=`) |
 | A **confidence interval** on a per-condition mean | `spatial_stats.cluster_t_interval(...)` | tomogram |
 | A **corrected pooled KS** with an effective-N | `spatial_stats.estimate_neff(...)` then a KS with that N | tomogram-equivalent patches |
+| Run a whole study (many features × N conditions, possibly several runs) | `morphometrics compare_batch study.yml` ([dataset.md](dataset.md#morphometrics-compare_batch-many-analyses-n-conditions-one-config)) | tomogram |
+| Ask whether a feature's local variation is **signal or noise**, and at what scale | `morphometrics variogram -n <feature>` (+ `measure_thickness --noise-estimate`) | — (QC) |
 
 Two rules cover almost everything:
 
@@ -86,8 +88,9 @@ The statistically load-bearing module.
   independent.
 - `weighted_ks_statistic`, `weighted_wasserstein` — area-weighted effect sizes.
 - `kish_neff`, `neff_from_neighbors`, `geodesic_semivariogram`,
-  `fit_correlation_length`, `neff_from_correlation_length`, `estimate_neff` — effective
-  sample-size estimation.
+  `euclidean_semivariogram`, `VariogramSums`, `fit_correlation_length` (exponential /
+  gaussian / auto model), `summarize_variogram_fit`, `neff_from_correlation_length`,
+  `estimate_neff` — semivariograms and effective sample-size estimation.
 - `cluster_t_interval`, `cluster_bootstrap` — confidence intervals.
 
 ---
@@ -249,6 +252,85 @@ plots/stats split would either break those imports or require re-export shims fo
 practical gain, and is deliberately deferred.
 
 ---
+
+## Spatial QC: is local variation signal or noise?
+
+Distributions and permutation tests say *whether* conditions differ. They do not say
+whether the triangle-to-triangle variation in a map of thickness or curvature is real
+membrane structure or measurement noise, or at what spatial scale it lives. Two
+complementary, opt-in tools answer that.
+
+### `morphometrics variogram` — correlation length, nugget, sill
+
+```bash
+morphometrics variogram config.yml -n thickness                 # every class
+morphometrics variogram config.yml -n curvedness_VV -c IMM --filter 'IMM:OMM_dist>40'
+morphometrics variogram config.yml -n thickness --geodesic      # along-surface distance
+```
+
+For each surface it estimates the semivariogram γ(h) (half the mean squared difference
+between triangles a distance h apart; robust Cressie–Hawkins estimator, area-weighted) and
+fits γ(h) = nugget + sill·(1 − ρ(h; ℓ)) + drift·h². It also pools the per-bin sums across
+the surfaces of each class (pairs are only ever taken *within* a surface) for a more stable
+class-level fit. Per surface and per class, `<feature>_variogram.csv` reports:
+
+| Column | Meaning |
+|---|---|
+| `ell` | correlation length — the scale of the structured variation |
+| `nugget` | variance at zero separation (noise + sub-resolution structure) |
+| `sill` | structured (spatially correlated) variance |
+| `structured_fraction` | sill / (nugget + sill) |
+| `drift` | smooth large-scale trend, absorbed so it is not mistaken for correlation |
+| `neff` | A / (2πℓ²) — independent patches on the surface |
+| `model` | `exponential` or `gaussian` correlated component (`--model auto` keeps the better fit) |
+| `ok` | false when ℓ is not identifiable (runs to the max lag) — see design decision 2 |
+
+The default distance is 3D (Euclidean), which needs only the CSV. It underestimates
+along-surface separation where a membrane folds back on itself (two cristae a few nm apart
+in 3D are far apart on the surface), so keep `--max-h` modest on folded membranes, or use
+`--geodesic` (graph-tool and the `.gt` graphs; ~2–3× slower).
+
+**Model choice matters for the nugget.** Neighborhood-averaged fields are smooth at short
+range (γ rises parabolically). An exponential model can only follow that by driving the
+nugget to zero, so on a synthetic smooth field with a known nugget of 0.25 the exponential
+fit returns ≈ 0 and the Gaussian fit ≈ 0.24–0.30. `--model auto` (the command default)
+picks whichever fits better; the library default (`fit_correlation_length`) stays
+exponential for compatibility.
+
+### The nugget is not a noise floor — use a split-half estimate
+
+Curvature is computed over a `radius_hit` neighborhood, and thickness/offset over an
+`average_radius` neighborhood. Neighboring triangles share most of their averaging window,
+so their *noise* is correlated too, and the variogram cannot separate it from signal. The
+nugget is artificially suppressed. On the example OMM, the thickness nugget fits to ≈ 0
+while the split-half noise variance is 0.055 nm².
+
+For the density-fit quantities, `measure_thickness --noise-estimate` measures the noise
+directly. For a random sample of triangles (`--noise-samples`, default 5000) it fits the
+bilayer twice, each time from a disjoint random half of the neighborhood's density
+profiles. The two halves are independent and each has twice the full fit's noise variance,
+so **var(A − B) / 4 = noise variance of the reported value**. Results go to
+`work_dir/thickness_noise.csv`, one row per surface, for both `thickness` and `offset`:
+`*_noise_var` (and a MAD-based `*_noise_var_robust`, since fits throw occasional outliers),
+`*_total_var` (the field's area-weighted variance), and `*_reliability` =
+1 − noise / total, the fraction of the map's variance that is signal. `variogram` picks this
+file up automatically and reports `split_half_noise_var` / `split_half_reliability` next to
+the fit.
+
+On the example dataset (`average_radius` 12 nm):
+
+| Surface | thickness noise SD | field SD | reliability (classical / robust) |
+|---|---|---|---|
+| OMM | 0.23 nm (robust 0.12) | 0.55 nm | 0.82 / 0.95 |
+| IMM | 0.26 nm (robust 0.14) | 0.56 nm | 0.79 / 0.94 |
+
+The thickness variogram on the same surfaces gives a Gaussian ℓ ≈ 7 nm.
+
+Caveats: density profiles of adjacent triangles sample overlapping voxels, so the halves are
+not perfectly independent and the noise is somewhat **under**estimated. Only triangles where
+both halves fit contribute (`*_n_both` of `*_n_sampled`). It costs about two extra fits per
+sampled triangle. The split-half applies only to quantities re-fitted from a neighborhood
+(thickness, offset), not to curvature or distances.
 
 ## Caveats and open items
 

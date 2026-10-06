@@ -59,46 +59,79 @@ def _surface_cache_key(path):
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
 
-def _default_bucket(group_name, buckets):
-    """The group's fallback bucket ("everything else"), i.e. the one with no patterns.
+REST = "rest"
 
-    A bucket whose pattern list is empty/null catches every tomogram no explicit bucket
-    claimed -- e.g. `{Positive: [tomo1, tomo2], Negative: []}` means "the listed tomograms
-    are Positive, all the rest are Negative", so only the interesting set is enumerated.
-    At most one default per group.
+
+def _bucket_patterns(group_name, label, spec):
+    """Normalize one bucket's spec to a list of glob patterns, or the REST marker.
+
+    A bucket is a list of names/globs, a single name/glob string, or the reserved word
+    ``rest`` ("every tomogram no other bucket in this group claimed"). An empty or null
+    spec is rejected: read literally it matches nothing, which is never what a bucket is
+    for, and silently treating it as a catch-all would sweep in every leftover tomogram.
+    Use ``"*"`` for "every tomogram". (To use a tomogram literally named ``rest``, put it
+    in a list: ``[rest]``.)
     """
-    defaults = [label for label, patterns in buckets.items() if not patterns]
-    if len(defaults) > 1:
-        raise ValueError(
-            f"group '{group_name}' has more than one default (pattern-less) bucket: "
-            f"{', '.join(defaults)}. At most one bucket may be the catch-all.")
-    return defaults[0] if defaults else None
+    if isinstance(spec, str):
+        if spec == REST:
+            return REST
+        return [spec] if spec else _empty_bucket_error(group_name, label)
+    if spec is None or (isinstance(spec, (list, tuple)) and len(spec) == 0):
+        _empty_bucket_error(group_name, label)
+    if not isinstance(spec, (list, tuple)):
+        raise ValueError(f"group '{group_name}', bucket '{label}': expected a list of "
+                         f"names/globs, a single glob, or `{REST}`; got {spec!r}")
+    return [str(p) for p in spec]
+
+
+def _empty_bucket_error(group_name, label):
+    raise ValueError(
+        f"group '{group_name}', bucket '{label}' is empty. Say what it holds: \"*\" for "
+        f"every tomogram, `{REST}` for every tomogram no other bucket claims, or a list "
+        "of names/globs.")
+
+
+def _normalize_groups(groups):
+    """{group: {bucket: patterns | REST}}, validated (at most one `rest` per group)."""
+    out = {}
+    for group_name, buckets in (groups or {}).items():
+        if not isinstance(buckets, dict) or not buckets:
+            raise ValueError(f"group '{group_name}' must map bucket names to patterns")
+        norm = {label: _bucket_patterns(group_name, label, spec)
+                for label, spec in buckets.items()}
+        rests = [label for label, p in norm.items() if p == REST]
+        if len(rests) > 1:
+            raise ValueError(
+                f"group '{group_name}' has more than one `{REST}` bucket: "
+                f"{', '.join(rests)}. At most one bucket may take the remainder.")
+        out[group_name] = norm
+    return out
 
 
 def assign_groups(tomograms, groups):
     """Map each tomogram to its bucket in every group, validating the assignment.
 
-    `groups` is `{group_name: {bucket_label: [name_or_glob, ...]}}`. Returns
+    `groups` is `{group_name: {bucket_label: patterns}}`, where patterns is a list of
+    names/globs, a single glob (``"*"`` = every tomogram), or the reserved word ``rest``
+    (the tomograms no other bucket in the group claimed -- e.g.
+    `{Positive: [tomo1, tomo2], Negative: rest}`). Returns
     `{tomogram: {group_name: bucket_label}}`. Raises ValueError listing every problem if
-    any tomogram matches zero buckets (unassigned) or more than one bucket (ambiguous) in
-    a group -- so a mislabeled tomogram is a load-time error, not a silent mistake.
-
-    A bucket with an empty pattern list is the group's **default** ("everything else"):
-    tomograms no other bucket claimed land there instead of being unassigned. See
-    :func:`_default_bucket`.
+    any tomogram matches zero buckets (unassigned) or more than one (ambiguous) in a
+    group -- so a mislabeled tomogram is a load-time error, not a silent mistake.
     """
+    groups = _normalize_groups(groups)
     assignment = {}
     problems = []
-    defaults = {name: _default_bucket(name, buckets) for name, buckets in groups.items()}
     for tomo in tomograms:
         meta = {}
         for group_name, buckets in groups.items():
+            rest = next((label for label, p in buckets.items() if p == REST), None)
             matched = [label for label, patterns in buckets.items()
-                       if patterns and _matches_any(tomo, patterns)]
+                       if patterns != REST and _matches_any(tomo, patterns)]
             if len(matched) == 1:
                 meta[group_name] = matched[0]
-            elif not matched and defaults[group_name] is not None:
-                meta[group_name] = defaults[group_name]
+            elif not matched and rest is not None:
+                meta[group_name] = rest
             elif not matched:
                 problems.append(
                     f"  {tomo}: no bucket in group '{group_name}' "
@@ -111,8 +144,8 @@ def assign_groups(tomograms, groups):
     if problems:
         raise ValueError(
             "config `groups:` does not assign every tomogram to exactly one bucket per "
-            "group. Fix the patterns, add a default (pattern-less) bucket, or exclude "
-            "these tomograms via statistics.exclude_tomograms:\n" + "\n".join(problems))
+            f"group. Fix the patterns, add a `{REST}` bucket, or exclude these tomograms "
+            "via statistics.exclude_tomograms:\n" + "\n".join(problems))
     return assignment
 
 
@@ -235,6 +268,30 @@ class Dataset:
         cache_dir = cls._resolve_cache_dir(cache, work_dir)
         return cls(work_dir, labels, used, radius_hit=radius_hit,
                    groups=config.get("groups") or {}, name=name, cache_dir=cache_dir,
+                   excluded_tomograms=excluded)
+
+    @classmethod
+    def from_work_dir(cls, work_dir, labels, radius_hit=9, groups=None, name=None,
+                      cache=False, include_tomograms=None, exclude_tomograms=None):
+        """Build a Dataset by discovering tomograms from the surface CSVs in `work_dir`.
+
+        For runs whose segmentation folder has moved or is not at hand (e.g. older
+        configs that used `data_dir`): a tomogram is any `<tomo>_<label>.AVV_rh{rh}.csv`
+        prefix for one of `labels`. Otherwise identical to :meth:`from_config`.
+        """
+        if not work_dir.endswith("/"):
+            work_dir += "/"
+        extension = f".AVV_rh{radius_hit}.csv"
+        found = set()
+        for path in glob(work_dir + "*" + extension):
+            base = os.path.basename(path)[: -len(extension)]
+            for label in labels:
+                if base.endswith("_" + label):
+                    found.add(base[: -(len(label) + 1)])
+        used, excluded = select_tomograms(sorted(found), include_tomograms,
+                                          exclude_tomograms)
+        return cls(work_dir, labels, used, radius_hit=radius_hit, groups=groups or {},
+                   name=name, cache_dir=cls._resolve_cache_dir(cache, work_dir),
                    excluded_tomograms=excluded)
 
     @staticmethod
@@ -444,3 +501,96 @@ class Dataset:
     def __repr__(self):
         return (f"Dataset(name={self.name!r}, {len(self.tomogram_names)} tomogram(s), "
                 f"labels={self.labels}, groups={list(self.groups)})")
+
+
+# ---------------------------------------------------------------------------
+# Legacy-pickle backend
+# ---------------------------------------------------------------------------
+
+class _LegacyExperimentUnpickler:
+    """Unpickle an `Experiment` pickle whatever module its classes were recorded under.
+
+    The research scripts pickled `Experiment`/`Tomogram` from a script, so the pickle
+    names them as `__main__.Experiment` (or `morphometrics_stats.Experiment` when the
+    module was imported bare). Rather than injecting the classes into `__main__`, this
+    remaps those two names to the library classes at load time.
+    """
+
+    _NAMES = ("Experiment", "Tomogram")
+
+    @classmethod
+    def load(cls, handle):
+        import pickle
+
+        from . import morphometrics_stats
+
+        class _Unpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                if name in cls._NAMES and (module == "__main__"
+                                           or module.split(".")[-1] == "morphometrics_stats"):
+                    return getattr(morphometrics_stats, name)
+                return super().find_class(module, name)
+
+        return _Unpickler(handle).load()
+
+
+def read_experiment_pickle(path):
+    """Load a legacy `morphometrics_stats.Experiment` pickle.
+
+    A migration path, not a storage format: pickles of numpy-backed objects do not load
+    across a numpy major-version change (a numpy-1.x environment cannot read a numpy-2.x
+    pickle), so regenerate per-surface CSVs from these while they still load.
+    """
+    with open(path, "rb") as handle:
+        return _LegacyExperimentUnpickler.load(handle)
+
+
+class PickleDataset(Dataset):
+    """A Dataset whose surfaces come from a legacy `Experiment` pickle instead of CSVs.
+
+    The backend contract of :class:`Dataset` is `surface_path` / `exists` / `load`;
+    overriding `exists` and `load` is all a backend needs, so filtering, grouping,
+    selection and `collect_feature` work unchanged. Use this for datasets whose source
+    CSVs no longer exist. There is no parquet cache (the whole pickle is in memory).
+    """
+
+    def __init__(self, experiment, labels=None, tomograms=None, groups=None, name=None,
+                 excluded_tomograms=None, source_path=None):
+        self.experiment = experiment
+        self.source_path = source_path
+        if labels is None:
+            labels = sorted({lab for t in experiment.tomograms.values()
+                             for lab in getattr(t, "dataframe_names", [])})
+        if tomograms is None:
+            tomograms = sorted(experiment.tomograms)
+        super().__init__(work_dir="", labels=labels, tomograms=tomograms, groups=groups,
+                         name=name, cache_dir=None, excluded_tomograms=excluded_tomograms)
+
+    @classmethod
+    def from_pickle(cls, path, labels=None, groups=None, name=None,
+                    include_tomograms=None, exclude_tomograms=None):
+        """Load `path` (see :func:`read_experiment_pickle`) and index its surfaces."""
+        experiment = read_experiment_pickle(path)
+        used, excluded = select_tomograms(sorted(experiment.tomograms),
+                                          include_tomograms, exclude_tomograms)
+        return cls(experiment, labels=labels, tomograms=used, groups=groups, name=name,
+                   excluded_tomograms=excluded, source_path=path)
+
+    def surface_path(self, tomo, label):
+        return f"{self.source_path or '<pickle>'}::{tomo}/{label}"
+
+    def exists(self, tomo, label):
+        tomogram = self.experiment.tomograms.get(tomo)
+        return tomogram is not None and tomogram.has_key(label)
+
+    def load(self, tomo, label):
+        if not self.exists(tomo, label):
+            raise KeyError(f"pickle has no surface for tomogram {tomo!r}, class {label!r}")
+        return self.experiment.tomograms[tomo][label]
+
+    def to_experiment(self, name=None):
+        return self.experiment
+
+    def __repr__(self):
+        return (f"PickleDataset(name={self.name!r}, {len(self.tomogram_names)} "
+                f"tomogram(s), labels={self.labels}, groups={list(self.groups)})")

@@ -11,8 +11,9 @@ Three capabilities, each usable on its own and composable:
 - **Grouping** — attach metadata (condition, morphology, …) to tomograms so a treatment
   comparison flows from the config instead of hand-coded lists.
 
-They are available both as command-line flags (`violin`, `compare`) and, for anything
-bespoke, through the `Dataset` object in Python.
+They are available as command-line flags (`violin`, `compare`, `compare_batch`), across
+several runs at once via a `datasets:` block, and, for anything bespoke, through the
+`Dataset` object in Python.
 
 ---
 
@@ -27,6 +28,9 @@ morphometrics violin config.yml -n thickness --exclude-tomograms UF3 TE1 --min-t
 
 # Treatment comparison between two conditions defined in the config `groups:` block
 morphometrics compare config.yml -n curvedness_VV -g condition
+
+# A whole study: many analyses x N conditions, possibly across several runs
+morphometrics compare_batch study.yml
 ```
 
 ```yaml
@@ -111,6 +115,26 @@ groups:
     elongated:  ["?E*"]
 ```
 
+A bucket is a list of names/globs, a single glob, or one of two explicit forms:
+
+| Bucket spec | Means |
+|---|---|
+| `"*"` | every tomogram (an ordinary glob — e.g. a dataset that is all one condition) |
+| `rest` | every tomogram **no other bucket in this group claimed** — at most one per group |
+
+```yaml
+groups:
+  drp1:
+    Positive: [ts_002, ts_017]     # enumerate only the interesting set...
+    Negative: rest                 # ...everything else lands here
+```
+
+An empty or missing bucket (`[]`, `null`) is an **error**, not a catch-all: read literally
+it would match nothing, and treating it as "the rest" would quietly sweep every leftover
+tomogram into it. (`"*"` next to another bucket is also an error — every tomogram would
+match two buckets; that is what `rest` is for. A tomogram literally named `rest` can still
+be listed as `[rest]`.)
+
 Every included tomogram must land in **exactly one bucket per group** — this is validated
 when the dataset loads, and a tomogram that matches zero buckets (unassigned) or more than
 one (ambiguous) is a clear error listing the offenders, not a silent mistake. Exclude
@@ -149,7 +173,7 @@ What it does, and why (see [statistics.md](statistics.md) for the full rationale
   comparison honest: a pooled test with *n = triangles* would report `p < 10⁻³⁰⁰` for
   almost any pair of conditions, because neighbouring triangles are not independent.
 - **The `floor`** is the smallest p-value the permutation could ever return given the
-  number of tomograms (`2 / C(n_a+n_b, n_a)`). With 3 vs 3 tomograms it is 0.1 — so even
+  number of tomograms (`1 / C(n_a+n_b, n_a)`, doubled when n_a = n_b). With 3 vs 3 tomograms it is 0.1 — so even
   perfectly separated conditions cannot beat p ≈ 0.1. The command flags when p is at the
   floor: the fix is *more tomograms*, not more triangles.
 - **Per-condition means** come with `cluster_t_interval` confidence intervals over the
@@ -166,6 +190,140 @@ morphometrics compare config.yml -n curvedness_VV -g condition --filter 'IMM:OMM
 
 Results are written to `<feature>_<group>_compare.csv` (one row per class, with the effect
 size, p-value, floor, and per-condition means + CIs).
+
+If a group has more than two buckets, pick the pair with `--conditions A B`.
+
+---
+
+## Multi-dataset comparisons
+
+Real studies often span several independently processed runs — a control dataset, a
+treatment dataset, a mutant segmented months later — each with its own `work_dir`. A
+**`datasets:`** block federates them into one comparison. Every analysis command
+(`compare`, `compare_batch`, `variogram`) accepts such a config in place of the usual
+`seg_dir`/`work_dir`:
+
+```yaml
+# study.yml
+classes: [OMM, IMM, ER]          # (or segmentation_values:) -- needed to parse CSV names
+statistics:
+  cache: true                    # parquet cache under each work_dir
+datasets:
+  control:
+    work_dir: /data/control/morphometrics/
+    groups: {condition: {Control: "*"}}        # "*" = every tomogram of this dataset
+  drug:
+    work_dir: /data/drug/morphometrics/
+    exclude_tomograms: [bad_ts_*]
+    groups: {condition: {Drug: "*"}}
+  mutant:
+    work_dir: /data/mutant/morphometrics/      # used if it holds surface CSVs...
+    pickle: ../mutant.pkl                      # ...otherwise this legacy Experiment pickle
+    groups:
+      condition:
+        Mutant positive: [ts_002, ts_017]      # name-split within one dataset
+        Mutant negative: rest                  # every tomogram not listed above
+```
+
+```bash
+morphometrics compare study.yml -n curvedness_VV -g condition --conditions Control Drug
+morphometrics compare study.yml -n IMM_dist -g dataset     # whole datasets, no groups needed
+```
+
+How it behaves:
+
+- **Backends.** Each entry loads from its per-surface CSVs when `work_dir` has them,
+  otherwise from a legacy `Experiment` `pickle`. Tomograms are discovered from the CSV names
+  (or from `seg_dir/*.mrc` when the entry gives a `seg_dir`), so runs whose segmentation
+  folder has moved still load. Relative paths resolve against the config file's folder.
+- **A dataset with no data is an error**, naming the path that was tried — a silently
+  dropped dataset would quietly change a comparison. Mark an entry `optional: true` to skip
+  it instead.
+- **Identity.** Units are namespaced `<dataset>/<tomogram>`, so two runs may both contain a
+  `ts_001` without being confused, and the nested permutation's floor counts tomograms
+  correctly.
+- **Metadata.** Each entry's `groups:` is merged over any top-level `groups:` and validated
+  per dataset (every tomogram in exactly one bucket). Every tomogram also carries an
+  implicit **`dataset`** group whose value is its dataset name.
+- Entry keys: `work_dir`, `seg_dir`, `pickle`, `groups`, `include_tomograms`,
+  `exclude_tomograms`, `classes`, `radius_hit`, `optional`.
+
+In Python, `MultiDataset` has the same collection interface as `Dataset`
+(`labels`, `metadata(stratum)`, `collect_feature`), so the `spatial_stats` recipe below
+works unchanged on it:
+
+```python
+from surface_morphometrics.multidataset import load_for_analysis
+ds = load_for_analysis(load_config("study.yml"), "study.yml")   # Dataset or MultiDataset
+records, diag = ds.collect_feature("curvedness_VV")              # strata: "control/ts_001"
+```
+
+---
+
+## `morphometrics compare_batch`: many analyses, N conditions, one config
+
+`compare` answers one question. A study usually asks a dozen — the same conditions
+compared on distances, on the curvature of several subcompartments, on verticality, on
+spread. `compare_batch` reads the whole specification from the config and runs each
+analysis at **both** levels:
+
+| Level | Unit | Output |
+|---|---|---|
+| per-unit summary | one area-weighted summary (peak / median / mean / std) per tomogram | violin per condition; pairwise Mann-Whitney, Welch t, summary KS |
+| pooled distribution | every triangle, p-value permuted over tomograms | area-weighted KS + permutation p (with its floor) + per-condition cluster CIs |
+
+```yaml
+comparison:
+  group: condition                 # which groups: block's buckets are compared
+  conditions:                      # report/plot order; bare names or dicts
+    - {name: Control, short: Ctrl, color: "#D55E00"}
+    - {name: Drug, short: Drug, color: "#0072B2"}
+    - Mutant negative
+    - Mutant positive
+  reference: Control               # optional: test each condition vs this one only
+  # pairs: [[Veh-E, Tg-E], [Veh-F, Tg-F]]   # optional: exactly these pairs (overrides reference)
+  separator_after: 2               # optional: dashed line after this violin
+  reps: 5000                       # permutation replicates (default 5000)
+  seed: 0
+  output: compare_batch            # relative to the config file
+analyses:
+  - {name: imm_omm_distance, class: OMM, feature: IMM_dist, statistic: peak,
+     range: [5, 25], filters: ["OMM:IMM_dist<40"], ci_statistic: median,
+     title: "OMM-IMM distance", xlabel: "Distance (nm)"}
+  - {name: crista_curvedness, class: IMM, feature: curvedness_VV, statistic: peak,
+     range: [0, 0.1], filters: ["IMM:OMM_dist>40"]}
+  - {name: crista_curvedness_spread, class: IMM, feature: curvedness_VV, statistic: std,
+     filters: ["IMM:OMM_dist>40"]}            # spread: summary level only (see below)
+```
+
+```bash
+morphometrics compare_batch study.yml
+morphometrics compare_batch study.yml --only crista_curvedness --split-components
+morphometrics compare_batch study.yml --conditions Control --conditions Drug   # a 2-way
+```
+
+Notes on the analysis fields:
+
+- `statistic` is the per-unit summary for the violin and summary-level tests; `range` is
+  the histogram range (and the binning range for `peak`).
+- `ci_statistic: median` makes the confidence intervals robust to a few tomograms with a
+  long tail (a mean is dragged by them).
+- `distribution_test: false` skips the pooled test. It defaults to false for
+  `statistic: std`: the pooled distribution does not depend on the summary statistic, so a
+  spread analysis would only repeat the location analysis's pooled row under another name.
+- `min_triangles` / `min_area` drop tiny units, as for `violin`.
+- `statistics.filters` (top level) applies to every analysis, e.g. a data-quality cut.
+
+For a factorial design (e.g. treatment × morphology), make one group whose buckets are the
+cells of the design and list the comparisons you want in `pairs:`. The worked example in
+[`examples/mitochondria/`](../examples/mitochondria/) ports the paper's 974-line
+`mitochondria_statistics.py` this way: a study config for every feature comparison, plus a
+short script for per-tomogram quantities (surface areas, contact-site fractions) and 2D
+histograms.
+
+Outputs, in the output folder: `summary.csv` (analysis × condition), `tests.csv` (one row
+per test, with a `level` column), and `<name>_violin.svg` / `<name>_hist.svg` figures
+(`--no-plots` to skip them). Runs are reproducible: the permutation seed is fixed.
 
 ---
 
@@ -242,3 +400,12 @@ pickle-based scripts in `old_scripts/`. Treat this as a convenience snapshot, no
 cache: pickles of numpy-backed objects do not load across a numpy major-version change
 (the reason the cache is parquet, not pickle). Prefer rebuilding the `Dataset` from the
 config.
+
+Going the other way, `PickleDataset.from_pickle("old.pkl", groups=...)` serves an existing
+`Experiment` pickle through the `Dataset` interface (filtering, grouping, collection all
+work), for datasets whose CSVs no longer exist. It loads pickles written from a script
+(whose classes are recorded as `__main__.Experiment`) without any `__main__` injection.
+It is a migration path: regenerate the per-surface CSVs while the pickle still loads.
+
+A different backend needs only `exists(tomo, label)` and `load(tomo, label)` overridden on
+a `Dataset` subclass; everything else comes from the base class.
