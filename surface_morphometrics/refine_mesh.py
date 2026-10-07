@@ -25,6 +25,7 @@ subcompartments. J Cell Biol 2025.
 import os
 os.environ["OMP_NUM_THREADS"] = "1"
 import gc
+import sys
 
 import numpy as np
 import pandas as pd
@@ -714,7 +715,6 @@ def run_pycurv_refinement(vtp_file, output_base, pixel_size, radius_hit, cores=6
     # call (scale=1 since the surface is already in nm; min_component=0 keeps all
     # components during refinement) and stream the child's output to this process.
     import subprocess
-    import sys
     runner = (
         "import os, sys\n"
         "os.environ['OMP_NUM_THREADS'] = '1'\n"  # before importing graph-tool/pycurv
@@ -806,14 +806,15 @@ def build_lightweight_graph(surf, output_gt_path):
 def finalize_surface_with_pycurv(surface_vtp, mrc_file, output_base, pixel_size,
                                  radius_hit, sample_spacing, scan_range, angstroms,
                                  cores, average_radius, compute_thickness=True):
-    """Run full pycurv on an already-refined surface to produce the final output.
+    """Run full pycurv on the final round of refinement to produce its curvature.
 
     Intermediate refinement iterations skip pycurv (they build fast lightweight
     VTK-normal graphs that are not curvature-ready).  This runs the single, full
-    pycurv normal-vector-voting pass on the final accepted surface so the user
-    gets a clean, curvature-ready graph/surface to move forward with.  It does
-    NOT move any vertices — the geometry is already final; it only computes
-    curvature (and, optionally, the local-thickness distribution).
+    pycurv normal-vector-voting pass on the final round of refinement so the user
+    gets a clean, curvature-ready graph/surface to inspect.  It does NOT move any
+    vertices — the geometry is already final; it only computes curvature (and,
+    optionally, the local-thickness distribution).  Nothing is "accepted" here:
+    that happens later, in `morphometrics accept_refinement`.
 
     Intended to be called exactly once, after the refinement loop, on every exit
     path (all iterations completed OR an early convergence stop).
@@ -836,13 +837,13 @@ def finalize_surface_with_pycurv(surface_vtp, mrc_file, output_base, pixel_size,
         'graph_file', 'surface_file', and thickness stats
         ('local_thicknesses', 'mean_thickness', 'std_thickness').
     """
-    print("\n=== Finalizing accepted surface with pycurv ===")
+    print("\n=== Final round of refinement: running pycurv ===")
     # pycurv runs in its own subprocess (see run_pycurv_refinement), so it no longer
     # inherits this process's memory. Still collect here to shrink this process's
     # resident footprint while the pycurv subprocess and its workers run, reducing
     # overall system memory pressure on a machine loaded by the full refinement run.
     gc.collect()
-    print("Running full pycurv normal vector voting for a curvature-ready final surface...")
+    print("Running full pycurv normal vector voting on the final round of refinement...")
     graph_file, surface_file = run_pycurv_refinement(
         surface_vtp, output_base, pixel_size, radius_hit, cores)
 
@@ -883,7 +884,8 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
                           original_positions=None, max_total_offset=None, use_xcorr=False,
                           smooth_offsets=True, offset_smoothing_radius=None,
                           laplacian_iterations=0, laplacian_lambda=0.5, lowpass_sigma=0,
-                          run_full_pycurv=True, compute_thickness=False):
+                          run_full_pycurv=True, warn_intermediate=True,
+                          compute_thickness=False):
     """
     Perform a single iteration of mesh refinement.
 
@@ -935,8 +937,12 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
         If True, run full pycurv normal-vector voting to produce a curvature-ready
         graph/surface. If False (used for every intermediate iteration), build a
         fast lightweight VTK-normal graph instead and warn that the surface is not
-        curvature-ready. The single full pycurv pass is run once on the final
-        accepted surface by finalize_surface_with_pycurv() after the loop.
+        curvature-ready. The single full pycurv pass is run once on the final round
+        of refinement by finalize_surface_with_pycurv() after the loop.
+    warn_intermediate : bool
+        Whether to warn that the lightweight surface is not curvature-ready. The
+        refinement loop passes False and emits its own note only when another round
+        follows, so the final round (which pycurv runs on immediately) stays quiet.
     compute_thickness : bool
         If True, compute local thickness distribution for all triangles (slow ~2 min).
         Only needed on the final iteration for the convergence histogram.
@@ -1070,10 +1076,11 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
     # Full pycurv normal-vector voting is the slow step (~28 min on large surfaces),
     # so it is skipped on every intermediate iteration: we build a fast lightweight
     # graph from VTK normals instead (good enough for the next iteration's density
-    # sampling and KDTree).  Full pycurv runs ONCE, on the final accepted surface,
+    # sampling and KDTree).  Full pycurv runs ONCE, on the final round of refinement,
     # via finalize_surface_with_pycurv() after the refinement loop — including when
     # the loop stops early on convergence.  Intermediate surfaces are therefore NOT
-    # curvature-ready.
+    # curvature-ready.  The caller sets warn_intermediate=False when it knows pycurv
+    # will run on this surface next (the final round), so the warning is not shown.
     if run_full_pycurv:
         print("Running pycurv normal vector voting...")
         new_graph_file, new_surface_file = run_pycurv_refinement(
@@ -1082,10 +1089,11 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
         sampling_csv = f"{output_base}.AVV_rh{radius_hit}_sampling.csv"
     else:
         print("Building lightweight graph from VTK normals (skipping pycurv NVV)...")
-        print("  WARNING: intermediate surface — pycurv was NOT run, so this surface has")
-        print("           no curvature data and is not ready for downstream analysis.")
-        print("           A full pycurv pass runs automatically on the final surface;")
-        print("           to use THIS mid-stage surface, run `morphometrics pycurv` on it.")
+        if warn_intermediate:
+            print("  WARNING: intermediate surface — pycurv was NOT run, so this surface has")
+            print("           no curvature data and is not ready for downstream analysis.")
+            print("           A full pycurv pass runs on the final round of refinement;")
+            print("           to use THIS mid-stage surface, run `morphometrics pycurv` on it.")
         new_graph_file = build_lightweight_graph(refined_surf, f"{output_base}.lightweight.gt")
         new_surface_file = refined_vtp
         print(f"  Lightweight graph: {new_graph_file}")
@@ -1395,13 +1403,13 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
 
     # Mesh refinement improves every surface and is the slowest pipeline step, but
     # it now runs pycurv's normal-vector voting only ONCE per surface — on the final
-    # accepted surface, after all iterations complete (or after an early convergence
-    # stop).  Intermediate iterations build fast lightweight VTK-normal graphs and
-    # are NOT curvature-ready.
+    # round of refinement, after all iterations complete (or after an early
+    # convergence stop).  Intermediate iterations build fast lightweight VTK-normal
+    # graphs and are NOT curvature-ready.  Nothing is accepted until accept_refinement.
     print("")
     print("=" * 70)
     print("NOTE: Mesh refinement is the slowest pipeline step, but it runs pycurv")
-    print("      only ONCE per surface — on the final accepted surface (after all")
+    print("      only ONCE per surface — on the final round of refinement (after all")
     print("      iterations, or after an early convergence stop). Intermediate")
     print("      per-iteration surfaces skip pycurv and are NOT curvature-ready;")
     print("      run `morphometrics pycurv` on one only if you want curvature for")
@@ -1613,6 +1621,7 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
                         laplacian_lambda=laplacian_lambda,
                         lowpass_sigma=lowpass_sigma,
                         run_full_pycurv=False,
+                        warn_intermediate=False,
                         compute_thickness=False
                     )
 
@@ -1717,10 +1726,18 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
                         elif not iter_use_xcorr:
                             print(f"  Converged (|offset|={mean_offset:.3f} nm < {convergence_threshold:.3f} nm). "
                                   f"Stopping early after iteration {iter_num}; "
-                                  f"running final pycurv on this surface.")
+                                  f"this is the final round of refinement.")
                             break
 
-                # Finalize the accepted surface: run full pycurv ONCE so the user
+                    # Warn only when another round follows. A convergence break exits
+                    # above, and the planned last iteration is excluded here, so the
+                    # final round of refinement (which pycurv runs on right after the
+                    # loop) never gets the "not curvature-ready" warning.
+                    if iter_num < iterations:
+                        print(f"  NOTE: iteration {iter_num} is an intermediate round — no curvature "
+                              f"data yet;\n        pycurv runs on the final round of refinement.")
+
+                # Finalize the final round of refinement: run full pycurv ONCE so the user
                 # gets a clean, curvature-ready final surface. Intermediate iterations
                 # skip pycurv (lightweight VTK-normal graphs only), so this single
                 # pass is what makes the output usable — and it runs on every exit
@@ -1931,8 +1948,10 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
               help='Laplacian smoothing strength 0-1 (default: from config, typically 0.3)')
 @click.option('--lowpass', type=float, default=None,
               help='3D Gaussian low-pass filter sigma in nm applied to tomogram (default: from config, 0=disabled)')
+@click.option('-f', '--force', is_flag=True, default=False,
+              help='Skip the interactive confirmation prompt when refining all tomograms.')
 def refine_mesh_cli(configfile, iterations, damping, output, component, tomogram, mrc, monolayer, max_offset, xcorr,
-                    xcorr_iterations, no_smooth, laplacian, laplacian_lambda, lowpass):
+                    xcorr_iterations, no_smooth, laplacian, laplacian_lambda, lowpass, force):
     """
     Iteratively refine mesh positions using density-guided vertex movement.
 
@@ -1942,8 +1961,8 @@ def refine_mesh_cli(configfile, iterations, damping, output, component, tomogram
     3. Smoothing the offset field to reduce noise
     4. Computing displacement vectors to center the surface
     5. Applying Laplacian smoothing to reduce roughness
-    6. Running pycurv to refine normal vectors
-    7. Iterating until convergence
+    6. Iterating until convergence
+    7. Running pycurv once, on the final round of refinement, for curvature
 
     CONFIGFILE: Path to the config.yml file
 
@@ -1964,6 +1983,20 @@ def refine_mesh_cli(configfile, iterations, damping, output, component, tomogram
     enabled to reduce surface roughness. Use --no-smooth to disable offset
     smoothing, or --laplacian 0 to disable Laplacian smoothing.
     """
+    # Refining every tomogram is by far the slowest thing in the pipeline, so make
+    # the batch case an explicit choice (mirrors the per-file recommendation below).
+    if tomogram is None and mrc is None:
+        print("No tomogram specified - will refine every tomogram found in tomo_dir")
+        print("Mesh refinement is by far the slowest step in the pipeline: each surface runs")
+        print("several density-sampling and fitting iterations, plus a full pycurv pass on")
+        print("the final round of refinement. This can take hours per tomogram.")
+        print("You may prefer to run one tomogram at a time, in parallel on a cluster.")
+        print("Recommended usage: morphometrics refine_mesh config.yml --tomogram <name>")
+        if not force:
+            answer = input("Continue? [y/n]")
+            if answer != "y":
+                sys.exit(1)
+
     # Convert flags to None if not set, so config can provide default
     monolayer_arg = True if monolayer else None
     xcorr_arg = True if xcorr else None

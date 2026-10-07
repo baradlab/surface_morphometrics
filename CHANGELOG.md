@@ -145,10 +145,12 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
   (i.i.d. triangle resampling assumes independence and under-covers badly); points at the
   `spatial_stats` cluster methods.
 
-## [2.0.0b6] — beta (unreleased)
+## [2.0.0b6] — beta
 
-Mesh generation decoupled from pycurv, in preparation for extracting it into a
-standalone importable library.
+Mesh generation decoupled from pycurv (in preparation for extracting it into a
+standalone importable library), density samples outside the tomogram reported as
+missing instead of extrapolated, and the batch confirmation prompt moved to
+`refine_mesh`.
 
 ### Added
 - First test coverage for the meshing path beyond `mrc2xyz`. `tests/test_xyz2ply.py`
@@ -179,6 +181,16 @@ standalone importable library.
 - Dropped the pymeshlab 2022.2.post3 `PercentageValue` compatibility shim, whose only
   user was the removed `ultrafine` branch. This also removes an undeclared dependency on
   `importlib_metadata`; `environment.yml` already requires pymeshlab >= 2023.12.
+- The batch "are you sure?" prompt moved from `distances_orientations` to `refine_mesh`.
+  Refining every tomogram is the slowest step in the pipeline (hours per tomogram), so
+  `morphometrics refine_mesh config.yml` with no `--tomogram` now asks before starting
+  (`-f/--force` skips it); `distances_orientations` (~15 minutes on the tutorial data) no
+  longer prompts. Its `-f/--force` is kept as a hidden no-op that prints a deprecation
+  note, so existing scripts keep working; it will be removed in 2.0.
+- `refine_mesh` output says "final round of refinement" rather than "accepted surface"
+  (nothing is accepted until `accept_refinement`), and the "not curvature-ready" warning
+  now appears only on intermediate rounds, not on the final round that pycurv runs on
+  immediately afterwards.
 
 ### Removed
 - `surface_generation.ultrafine`, superseded by isotropic remeshing (`isotropic_remesh` /
