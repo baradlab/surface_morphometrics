@@ -20,7 +20,6 @@ __license__ = "GPLv3"
 
 import os
 import glob
-import sys
 
 import click
 import yaml
@@ -34,8 +33,8 @@ from . import interdistance_orientation
 @click.command(name="distances_orientations")
 @click.argument("configfile", type=click.Path(exists=True))
 @click.argument("segmentation", required=False, default=None)
-@click.option("-f", "--force", is_flag=True, default=False,
-              help="Skip the interactive confirmation prompt when running on all files.")
+@click.option("-f", "--force", is_flag=True, default=False, hidden=True,
+              help="Deprecated no-op: distances_orientations no longer prompts.")
 def distances_orientations_cli(configfile, segmentation, force):
     """Measure intra- and inter-surface distances and orientations.
 
@@ -45,17 +44,12 @@ def distances_orientations_cli(configfile, segmentation, force):
     """
     config = load_config(configfile, require=("seg_dir", "work_dir", "segmentation_values"))
 
+    if force:
+        print("NOTE: -f/--force is no longer needed (distances_orientations does not prompt) "
+              "and will be removed in 2.0; drop it from your scripts.")
     # See if a specific file was specified
     if segmentation is None:
         print("No input file specified - will run on meshes for all segmentation files in the data directory")
-        print("This may take a bit of time - each measurement will take a minute or two per surface, and they can add up.")
-        print("You may prefer to run in parallel with a cluster submission script for individual files")
-        print("The example config and tutorial data takes about 12-15 minutes on a laptop.")
-        print("Recommended usage: morphometrics distances_orientations config.yml <segmentation.mrc>")
-        if not force:
-            answer = input("Continue? [y/n]")
-            if answer != "y":
-                sys.exit(1)
         print("Pattern Matched: " + config["seg_dir"] + "*.mrc")
         segmentation_files = glob.glob(config["seg_dir"] + "*.mrc")
         segmentation_files = [os.path.basename(f) for f in segmentation_files]
