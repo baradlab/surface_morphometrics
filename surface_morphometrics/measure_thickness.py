@@ -20,7 +20,6 @@ from matplotlib import pyplot as plt
 import scipy.optimize as opt
 import scipy.signal as signal
 import scipy.stats as stats
-from scipy import spatial
 from glob import glob
 from pathlib import Path
 import os
@@ -110,18 +109,28 @@ def find_two_peaks(x,y):
     return width, peak1, peak2
 
 
-from ._thickness_worker import (init_worker, fit_triangle_chunk,
+from ._thickness_worker import (init_worker, fit_triangle_chunk, radius_neighbors,
                                 _seed_bilayer_center, _compute_r_squared,
                                 _dual_gaussian_shared_width, _symmetric_fit_window,
-                                R2_THRESHOLD, MIN_THICKNESS, MAX_THICKNESS)
+                                R2_THRESHOLD, MIN_THICKNESS, MAX_THICKNESS,
+                                MIN_LEAFLET_AMP_RATIO, PINNED_THICKNESS_EPS)
 
 
-def _global_bilayer_prior(thickness_set, x):
+def _global_bilayer_prior(thickness_set, x, force=False):
     """Fit the whole-surface average density profile to a bilayer.
 
-    Returns ``(c1, w, c2, w)`` to seed the per-triangle recovery tier (so locally
-    merged triangles on a clearly-bilayer surface can still be measured), or ``None``
-    if the surface average does not resolve a bilayer.
+    Returns ``(params, forced)``. ``params`` is ``(c1, w, c2, w)`` to seed the
+    per-triangle recovery tier (so locally merged triangles on a clearly-bilayer
+    surface can still be measured), or ``None`` if there is no usable prior.
+
+    Normally a prior is only produced when the surface average itself resolves two
+    leaflets. With ``force=True``, a surface average that shows a single merged
+    (flat-topped) peak is fitted as a bilayer anyway; ``forced`` is then True. A
+    forced prior is only trusted if it passes the same checks as a per-triangle
+    recovery fit (good R^2, a separation clear of the floor, comparable leaflet
+    amplitudes). Thicknesses measured with it are lower-confidence: when the leaflets
+    are merged, separation trades off against leaflet width, so the value leans on
+    the fit model more than on resolved density.
     """
     avg = thickness_set.mean(axis=0).to_numpy() * -1
     avg = avg - avg.min()
@@ -133,10 +142,14 @@ def _global_bilayer_prior(thickness_set, x):
     lm = np.argmin(avg[:mid]); rm = np.argmin(avg[mid:]) + mid
     a, b = x[lm + 2:rm - 2], avg[lm + 2:rm - 2]
     if len(a) < 7:
-        return None
+        return None, False
     cs, hs, n_resolved = _seed_bilayer_center(a, b)
-    if n_resolved < 2:
-        return None
+    forced = n_resolved < 2
+    if forced and not force:
+        return None, False
+    if forced:
+        # Seed a typical bilayer half-separation about the single merged peak.
+        hs = 0.5 * (MIN_THICKNESS + MAX_THICKNESS) / 2.0
     try:
         af, bf = _symmetric_fit_window(a, b, cs, hs)
         p, _ = opt.curve_fit(_dual_gaussian_shared_width, af, bf,
@@ -144,9 +157,16 @@ def _global_bilayer_prior(thickness_set, x):
                              bounds=([0.005, 0.005, 0.8, cs - 3, MIN_THICKNESS / 2.0, -1],
                                      [0.04, 0.04, 2.2, cs + 3, MAX_THICKNESS / 2.0, 1]))
     except Exception:
-        return None
+        return None, False
     c, half, w = p[3], p[4], p[2]
-    return (c - half, w, c + half, w)
+    if forced:
+        r2 = _compute_r_squared(bf, _dual_gaussian_shared_width(af, *p))
+        thickness = 2.0 * half
+        if not (r2 > R2_THRESHOLD
+                and MIN_THICKNESS + PINNED_THICKNESS_EPS < thickness <= MAX_THICKNESS
+                and min(p[0], p[1]) >= MIN_LEAFLET_AMP_RATIO * max(p[0], p[1])):
+            return None, False
+    return (c - half, w, c + half, w), forced
 
 
 def split_half_neighbors(distances, neighbor_indices, rows, half_labels):
@@ -217,8 +237,8 @@ def _fit_rows(thickness_arr, distances, neighbor_indices, x, global_fit_params, 
             np.array([r[1] for r in results], dtype=float))
 
 
-def process_single_surface(filename, average_radius, output_dir, noise_samples=0,
-                           noise_seed=0):
+def process_single_surface(filename, average_radius, output_dir, force_bilayer_prior=False,
+                           noise_samples=0, noise_seed=0):
     """
     Process a single thickness sampling file: compute per-triangle thickness,
     generate plots, and write the thickness back into the surface graph/.vtp/.csv
@@ -232,6 +252,10 @@ def process_single_surface(filename, average_radius, output_dir, noise_samples=0
         Radius for local averaging in thickness calculations
     output_dir : str
         Directory for output files
+    force_bilayer_prior : bool
+        Fit the whole-surface average as a bilayer even when it shows a single
+        merged peak, enabling recovery of merged triangles (flagged per triangle in
+        ``forced_bilayer_prior``). Off by default.
     noise_samples : int
         If > 0, also run a split-half noise estimate on this many randomly chosen
         triangles (see :func:`split_half_noise`); the result is returned under
@@ -272,7 +296,6 @@ def process_single_surface(filename, average_radius, output_dir, noise_samples=0
     xyz_2d = tg.graph.vp.xyz.get_2d_array([0, 1, 2])
     xx, yy, zz = xyz_2d
     xyz = xyz_2d.T
-    xyztree = spatial.cKDTree(xyz)
 
     avg_x = np.average(xx, weights=areas)
     avg_y = np.average(yy, weights=areas)
@@ -294,7 +317,7 @@ def process_single_surface(filename, average_radius, output_dir, noise_samples=0
 
     # Batch KDTree query - query all points at once (much faster than per-point)
     print(f"  Running batch KDTree query for {n_triangles} triangles...")
-    distances, neighbor_indices = xyztree.query(xyz, k=500, distance_upper_bound=average_radius, workers=-1)
+    distances, neighbor_indices = radius_neighbors(xyz, average_radius)
 
     # Per-triangle thickness calculation using multiprocessing
     print(f"  Fitting dual gaussians using multiprocessing...")
@@ -309,12 +332,25 @@ def process_single_surface(filename, average_radius, output_dir, noise_samples=0
     # bilayer, this lets the per-triangle recovery tier measure locally-merged
     # triangles too; each measurement carries a resolution score so the recovered
     # (lower-confidence, slightly thin) values stay distinguishable.
-    global_fit_params = _global_bilayer_prior(thickness_set, x)
-    if global_fit_params is not None:
+    global_fit_params, prior_forced = _global_bilayer_prior(
+        thickness_set, x, force=force_bilayer_prior)
+    if global_fit_params is not None and prior_forced:
+        print(f"  WARNING: global average did not resolve a bilayer; forcing a bilayer "
+              f"prior (force_bilayer_prior: true, thickness "
+              f"{abs(global_fit_params[2] - global_fit_params[0]):.2f} nm). Thicknesses "
+              "recovered with it are lower-confidence and flagged in forced_bilayer_prior.")
+    elif global_fit_params is not None:
         print(f"  Global average resolved a bilayer; recovery tier enabled "
               f"(thickness {abs(global_fit_params[2] - global_fit_params[0]):.2f} nm).")
+    elif force_bilayer_prior:
+        print("  Global average did not resolve a bilayer and a forced bilayer fit "
+              "failed; per-triangle fits stay strict.")
     else:
-        print("  Global average did not resolve a bilayer; per-triangle fits stay strict.")
+        print("  Global average did not resolve a bilayer; per-triangle fits stay strict.\n"
+              "  If many triangles come back NaN, the leaflets are likely merged at this "
+              "pixel size. Sampling a less-binned tomogram is the best fix; "
+              "thickness_measurements: force_bilayer_prior: true recovers more "
+              "triangles at lower confidence.")
 
     # Use initializer to share data once per worker (avoids repeated pickling)
     with mp.Pool(n_workers, initializer=init_worker,
@@ -331,6 +367,8 @@ def process_single_surface(filename, average_radius, output_dir, noise_samples=0
     per_surface_thickness = [r[0] for r in results]
     per_triangle_offset = [r[1] for r in results]
     per_triangle_resolution = [r[2] for r in results]
+    # 1 where the thickness exists only because of a forced (unresolved) global prior.
+    per_triangle_forced = [float(r[3] and prior_forced) for r in results]
 
     noise = None
     if noise_samples and noise_samples > 0:
@@ -420,11 +458,16 @@ def process_single_surface(filename, average_radius, output_dir, noise_samples=0
     # obtained by prior recovery (lower confidence, reads slightly thin).
     bilayer_resolution = tg.graph.new_vertex_property("float")
     bilayer_resolution.a = per_triangle_resolution
+    # 1 = this triangle's thickness relies on a forced whole-surface bilayer prior
+    # (force_bilayer_prior); 0 otherwise. Always written so the schema is stable.
+    forced_bilayer_prior = tg.graph.new_vertex_property("float")
+    forced_bilayer_prior.a = per_triangle_forced
 
     tg.graph.vp.average_width = average_width_prop
     tg.graph.vp.thickness = thick
     tg.graph.vp.offset = offset
     tg.graph.vp.bilayer_resolution = bilayer_resolution
+    tg.graph.vp.forced_bilayer_prior = forced_bilayer_prior
     tg.graph.save(graph_file_final)
 
     surf = tg.graph_to_triangle_poly()
@@ -494,6 +537,7 @@ def run_measure_thickness(config, output_dir=None, noise_samples=0, noise_seed=0
     thickness_config = config.get("thickness_measurements", {})
     components = thickness_config.get("components", [])
     average_radius = thickness_config.get("average_radius", 12)
+    force_bilayer_prior = bool(thickness_config.get("force_bilayer_prior", False))
     radius_hit = config.get("curvature_measurements", {}).get("radius_hit", 9)
     # Note: nsamples and scan_range are now read from CSV headers (set by sample_density.py)
 
@@ -506,6 +550,7 @@ def run_measure_thickness(config, output_dir=None, noise_samples=0, noise_seed=0
     print(f"  Output directory: {output_dir}")
     print(f"  Components: {components}")
     print(f"  Average radius: {average_radius}")
+    print(f"  Force bilayer prior: {force_bilayer_prior}")
     print(f"  Radius hit: {radius_hit}")
 
     # Find files for each component
@@ -539,6 +584,7 @@ def run_measure_thickness(config, output_dir=None, noise_samples=0, noise_seed=0
             for index, filename in enumerate(filenames[component]):
                 info, per_surface_thickness, norm_areas, width, x, fig2, ax2 = \
                     process_single_surface(filename, average_radius, output_dir,
+                                           force_bilayer_prior=force_bilayer_prior,
                                            noise_samples=noise_samples,
                                            noise_seed=noise_seed)
                 if info.get('noise'):
@@ -658,8 +704,12 @@ def run_measure_thickness(config, output_dir=None, noise_samples=0, noise_seed=0
               help='Triangles per surface used for --noise-estimate.')
 @click.option('--noise-seed', type=int, default=0, show_default=True,
               help='RNG seed for --noise-estimate.')
+@click.option('--force_bilayer_prior/--no_force_bilayer_prior', default=None,
+              help='Fit the surface-average profile as a bilayer even when it shows a '
+                   'single merged peak, recovering more (lower-confidence) triangles. '
+                   'Overrides config.')
 def measure_thickness_cli(configfile, output, average_radius, noise_estimate,
-                          noise_samples, noise_seed):
+                          noise_samples, noise_seed, force_bilayer_prior):
     """
     Measure membrane thickness from density sampling data.
 
@@ -676,6 +726,8 @@ def measure_thickness_cli(configfile, output, average_radius, noise_estimate,
         if "thickness_measurements" not in config:
             config["thickness_measurements"] = {}
         config["thickness_measurements"]["average_radius"] = average_radius
+    if force_bilayer_prior is not None:
+        config.setdefault("thickness_measurements", {})["force_bilayer_prior"] = force_bilayer_prior
 
     run_measure_thickness(config, output_dir=output,
                           noise_samples=noise_samples if noise_estimate else 0,

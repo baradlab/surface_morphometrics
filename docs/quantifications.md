@@ -240,7 +240,13 @@
 
 ### `bilayer_resolution`
 - **Description:**  
-  A per-triangle reliability flag in the range [0, 1] for the reported `Thickness`: how clearly the two bilayer leaflets are resolved in the local density profile. A value near 1 means two cleanly separated leaflets; values toward 0 mean the leaflets are merged into a single peak and the thickness was recovered with help from the whole-surface average fit (and tends to read slightly thin). A practical cutoff is 0.5 — values ≥ 0.5 are high-confidence measurements and values below 0.5 are lower-confidence. NaN where no thickness was measured.
+  A per-triangle reliability flag in the range [0, 1] for the reported `Thickness`: how clearly the two bilayer leaflets are resolved in the local density profile. A value near 1 means two cleanly separated leaflets; values toward 0 mean the leaflets are merged into a single peak and the thickness was recovered with help from the whole-surface average fit (and tends to read slightly thin). A practical cutoff is 0.5 — values ≥ 0.5 are high-confidence measurements and values below 0.5 are lower-confidence. NaN where no thickness was measured. See also `forced_bilayer_prior`.
+
+---
+
+### `forced_bilayer_prior`
+- **Description:**  
+  A per-triangle flag (1 or 0) for the reported `Thickness`. It is 1 where the thickness was obtained only because `thickness_measurements: force_bilayer_prior` was enabled: the whole-surface average profile did not resolve two leaflets, was fitted as a bilayer anyway, and that forced fit seeded the recovery of this triangle's merged profile. These are the least reliable thickness measurements: with the leaflets merged, the fitted separation trades off against leaflet width, so the value leans on the fit model more than on resolved density, and it shifts with `average_radius` and tomogram resolution. Note that on such data the triangles that *do* resolve strictly are not an unbiased reference either: they are selected for unusually wide leaflet separations and can read thick. Use flagged values for relative comparisons within matched data at most, and check them together with `bilayer_resolution`. It is 0 for every other triangle (including NaN-thickness triangles), and 0 everywhere when the option is off (the default).
 
 ---
 

@@ -42,6 +42,43 @@ def usable_profile_rows(profiles):
     return np.all(np.isfinite(profiles), axis=1)
 
 
+def radius_neighbors(xyz, radius, query_xyz=None, max_neighbors=500, seed=0):
+    """Triangles within ``radius`` of each query point, padded like ``cKDTree.query``.
+
+    Returns ``(distances, indices)`` of shape (n_query, max_neighbors); unused slots
+    hold ``inf`` and ``len(xyz)``, exactly as ``cKDTree.query(..., k=max_neighbors,
+    distance_upper_bound=radius)`` would return them.
+
+    A plain k-nearest query silently shrinks the neighborhood on finely meshed
+    surfaces: once a ball of ``radius`` holds more than ``max_neighbors`` triangles,
+    only the nearest ``max_neighbors`` are kept, so the effective averaging radius is
+    smaller than configured (e.g. ~8 nm instead of 12 nm at ~0.4 nm^2 per triangle).
+    Instead, when a typical (90th-percentile) ball would overflow, the surface is
+    thinned uniformly at random so a ball holds about ``max_neighbors`` triangles,
+    keeping the neighborhood spread over the full radius at the same cost. ``seed``
+    makes the thinning reproducible.
+    """
+    from scipy import spatial
+
+    xyz = np.asarray(xyz, dtype=float)
+    query = xyz if query_xyz is None else np.asarray(query_xyz, dtype=float)
+    tree = spatial.cKDTree(xyz)
+    rng = np.random.default_rng(seed)
+    probe = query if len(query) <= 2000 else query[rng.choice(len(query), 2000, replace=False)]
+    counts = tree.query_ball_point(probe, radius, return_length=True, workers=-1)
+    dense = float(np.percentile(counts, 90)) if len(counts) else 0.0
+    keep = None
+    if dense > max_neighbors:
+        keep = np.flatnonzero(rng.random(len(xyz)) < max_neighbors / dense)
+        tree = spatial.cKDTree(xyz[keep])
+    distances, indices = tree.query(query, k=max_neighbors,
+                                    distance_upper_bound=radius, workers=-1)
+    if keep is not None:
+        missing = indices >= len(keep)
+        indices = np.where(missing, len(xyz), keep[np.minimum(indices, len(keep) - 1)])
+    return distances, indices
+
+
 def _monogaussian(x, h, c, w):
     """Single gaussian function."""
     return h * np.exp(-(x - c)**2 / (2 * w**2))
@@ -513,10 +550,12 @@ def fit_triangle_chunk(indices):
     Returns
     -------
     list of tuples
-        [(thickness, offset, resolution), ...] for each triangle in chunk.
+        [(thickness, offset, resolution, recovered), ...] for each triangle in chunk.
         ``thickness`` is NaN where no valid bilayer was measured; ``resolution`` is
         the per-triangle bilayer-resolution score in [0, 1] (NaN if there was no
         profile to score) -- a reliability flag for the reported thickness.
+        ``recovered`` is 1 if the reported thickness came from the prior-recovery
+        tier (the local profile did not resolve two leaflets on its own), else 0.
     """
     sample_spacing = _worker_x[1] - _worker_x[0] if len(_worker_x) > 1 else 1.0
     max_shift_samples = max(1, int(round(2.0 / sample_spacing)))
@@ -529,7 +568,7 @@ def fit_triangle_chunk(indices):
         neighbors = _worker_neighbor_indices[i][valid_mask]
 
         if len(neighbors) == 0:
-            results.append((np.nan, 0, np.nan))
+            results.append((np.nan, 0, np.nan, 0))
             continue
 
         # Drop neighbors whose linescan left the tomogram (NaN samples). Without
@@ -537,7 +576,7 @@ def fit_triangle_chunk(indices):
         # a triangle that is itself well inside the volume loses its measurement.
         inside = usable_profile_rows(_worker_thickness_arr[neighbors])
         if not np.any(inside):
-            results.append((np.nan, 0, np.nan))
+            results.append((np.nan, 0, np.nan, 0))
             continue
         l, neighbors = l[inside], neighbors[inside]
 
@@ -550,7 +589,7 @@ def fit_triangle_chunk(indices):
             dat = dat - dat.min()
             dat_sum = dat.sum()
             if dat_sum == 0:
-                results.append((np.nan, 0, np.nan))
+                results.append((np.nan, 0, np.nan, 0))
                 continue
             dat = dat / (80 / 81 * dat_sum)
         else:
@@ -561,7 +600,7 @@ def fit_triangle_chunk(indices):
             row_sums = indiv.sum(axis=1, keepdims=True)
             valid_rows = row_sums.flatten() > 0
             if not np.any(valid_rows):
-                results.append((np.nan, 0, np.nan))
+                results.append((np.nan, 0, np.nan, 0))
                 continue
             indiv[valid_rows] /= (80 / 81 * row_sums[valid_rows])
 
@@ -593,7 +632,7 @@ def fit_triangle_chunk(indices):
         b = dat[left_min+2:right_min-2]
 
         if len(a) < 7:  # Need enough points for the fit
-            results.append((np.nan, 0, np.nan))
+            results.append((np.nan, 0, np.nan, 0))
             continue
 
         # Per-triangle reliability flag reported alongside every thickness: how clearly
@@ -622,7 +661,7 @@ def fit_triangle_chunk(indices):
 
         recovery = n_resolved < 2 and have_prior
         if n_resolved < 2 and not recovery:
-            results.append((np.nan, 0, resolution))
+            results.append((np.nan, 0, resolution, 0))
             continue
 
         try:
@@ -639,11 +678,11 @@ def fit_triangle_chunk(indices):
             else:
                 accept = r2 > R2_THRESHOLD and MIN_THICKNESS <= thickness <= MAX_THICKNESS
             if accept:
-                results.append((thickness, offset, resolution))
+                results.append((thickness, offset, resolution, int(recovery)))
             else:
-                results.append((np.nan, 0, resolution))
+                results.append((np.nan, 0, resolution, 0))
         except Exception:
-            results.append((np.nan, 0, resolution))
+            results.append((np.nan, 0, resolution, 0))
 
     return results
 

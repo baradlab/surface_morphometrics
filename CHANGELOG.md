@@ -149,8 +149,10 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
 
 Mesh generation decoupled from pycurv (in preparation for extracting it into a
 standalone importable library), density samples outside the tomogram reported as
-missing instead of extrapolated, and the batch confirmation prompt moved to
-`refine_mesh`.
+missing instead of extrapolated, the batch confirmation prompt moved to
+`refine_mesh`, and thickness recovery for poorly resolved bilayers: cubic density
+sampling by default, local averaging over the full configured radius, and an opt-in
+forced bilayer prior with a per-triangle flag.
 
 ### Added
 - First test coverage for the meshing path beyond `mrc2xyz`. `tests/test_xyz2ply.py`
@@ -164,6 +166,26 @@ missing instead of extrapolated, and the batch confirmation prompt moved to
 - `tests/test_version.py` pins `surface_morphometrics.__version__` to `pyproject.toml`'s
   `version`. The two had drifted apart twice (fixed in 2.0.0b3, drifted again at
   2.0.0b5) because a release bumps one and forgets the other.
+- `thickness_measurements: force_bilayer_prior` (default `false`; also
+  `measure_thickness --force_bilayer_prior`). The prior-recovery tier that measures
+  locally merged triangles only switches on when the whole-surface average profile
+  resolves two leaflets. On data where the average itself is a single flat-topped peak
+  (e.g. OMM at ~1 nm/px) recovery never ran, and most triangles came back NaN. With
+  the option on, that average is fitted as a bilayer anyway (accepted only if it passes
+  the recovery checks: R², a separation clear of the floor, comparable leaflet
+  amplitudes) and used as the prior. On four OMM test surfaces at 9.98 Å/px this took
+  the measured fraction from 14–44% to 82–87%. Recovered values are lower-confidence
+  (0.3–0.4 nm thinner than the few strict fits on those surfaces, and dependent on
+  `average_radius`; in a synthetic blur test the strict survivors read thick and the
+  recovered values were closer to the unblurred truth), so they are flagged rather
+  than mixed in silently.
+- Per-triangle `forced_bilayer_prior` column (1/0) in the surface graph/.vtp/.csv:
+  1 where the thickness relies on a forced prior. Together with `bilayer_resolution`
+  it identifies low-confidence regions.
+- When the surface average does not resolve a bilayer, `measure_thickness` now says so
+  and suggests sampling a less-binned tomogram (or the new option).
+- `density_sampling: interpolation` (`cubic` default, or `linear`), used by both
+  `sample_density` and `refine_mesh`. See Changed.
 
 ### Changed
 - `vtk` is now a declared dependency in `pyproject.toml` (`vtk>=9`). It was always
@@ -191,6 +213,26 @@ missing instead of extrapolated, and the batch confirmation prompt moved to
   (nothing is accepted until `accept_refinement`), and the "not curvature-ready" warning
   now appears only on intermediate rounds, not on the final round that pycurv runs on
   immediately afterwards.
+- **Density is now sampled with a cubic B-spline by default** (previously always
+  trilinear). Linear interpolation blurs most at points halfway between voxels, and at
+  ~1 nm/px that extra, position-dependent blur is enough to merge a bilayer's leaflets.
+  On four 9.98 Å/px OMM surfaces cubic sampling raised the strictly measured fraction
+  from 14–49% to 25–58%, with medians 0.05–0.27 nm lower; on a well-resolved example
+  surface thickness was unchanged (median 2.92 → 2.90 nm) while triangles with clearly
+  resolved leaflets rose from 54% to 67%. Spline coefficients are computed only for
+  the block of the tomogram the surface spans, so memory and run time are comparable
+  to linear. Samples outside the tomogram are still NaN. **Thickness values change
+  slightly: don't pool measurements made with and without it**; set
+  `interpolation: linear` to reproduce earlier results.
+- **Local averaging now uses the full configured radius on finely meshed surfaces.**
+  `measure_thickness` and `refine_mesh` gathered neighbors with a k=500 nearest
+  query, so once a ball of `average_radius` held more than 500 triangles only the
+  nearest 500 were kept and the effective radius silently shrank (e.g. ~8 nm instead
+  of 12 nm at ~0.4 nm² per triangle; far below 25 nm for refinement). Neighborhoods
+  are now drawn from a reproducibly, uniformly thinned surface so they span the whole
+  radius at the same cost (`_thickness_worker.radius_neighbors`). Surfaces whose
+  neighborhoods never exceeded 500 triangles are unaffected; on denser meshes
+  refinement centering and thickness now average over the radius you configured.
 
 ### Removed
 - `surface_generation.ultrafine`, superseded by isotropic remeshing (`isotropic_remesh` /
