@@ -292,13 +292,15 @@ def test_thickness_recovery_and_resolution_score():
         res = tw.fit_triangle_chunk(list(range(n)))
     finally:
         tw.init_worker(None, None, None, x)
-    (t_res, _, s_res), (t_mer, _, s_mer), (t_sin, _, s_sin) = res
+    (t_res, _, s_res, r_res), (t_mer, _, s_mer, r_mer), (t_sin, _, s_sin, r_sin) = res
     # resolved: measured, high-confidence score
     assert tw.MIN_THICKNESS <= t_res <= tw.MAX_THICKNESS and s_res >= 0.5
     # merged: recovered (measured) but flagged low-confidence
     assert tw.MIN_THICKNESS <= t_mer <= tw.MAX_THICKNESS and s_mer < 0.5
     # genuine single peak: no thickness
     assert np.isnan(t_sin)
+    # only the merged triangle's thickness came from the recovery tier
+    assert (r_res, r_mer, r_sin) == (0, 1, 0)
 
 
 def test_thickness_no_prior_stays_strict():
@@ -310,11 +312,12 @@ def test_thickness_no_prior_stays_strict():
     tw.init_worker(-merged[None, :], np.zeros((1, 1)), np.array([[0]]), x,
                    use_xcorr=False, global_fit_params=None)
     try:
-        thk, _, score = tw.fit_triangle_chunk([0])[0]
+        thk, _, score, recovered = tw.fit_triangle_chunk([0])[0]
     finally:
         tw.init_worker(None, None, None, x)
     assert np.isnan(thk)            # no prior -> no recovery
     assert score < 0.5             # but the score still reports it was unresolved
+    assert recovered == 0
 
 
 def test_monogaussian_peak_and_symmetry():

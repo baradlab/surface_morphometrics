@@ -53,10 +53,12 @@ DEFAULTS = {
     "density_sampling": {
         "sample_spacing": 0.25,
         "scan_range": 10,
+        "interpolation": "cubic",
     },
     "thickness_measurements": {
         "average_radius": 12,
         "fit_curve": True,
+        "force_bilayer_prior": False,
     },
     "patch_analysis": {
         "patch_radius": 12,

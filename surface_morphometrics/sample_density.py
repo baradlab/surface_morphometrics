@@ -89,7 +89,48 @@ def load_mrc(filename, angstroms=False):
         data_matrix = (np.arange(data.shape[0]),np.arange(data.shape[1]),np.arange(data.shape[2]))
     return data,data_matrix, voxsize, origin
 
-def interpolate(data, data_matrix, xyz, n_v, sample_spacing=0.25, angstroms=False, scan_range=10):
+INTERPOLATION_ORDERS = {"linear": 1, "cubic": 3}
+
+
+def _interpolation_order(interpolation):
+    """Spline order for a ``density_sampling.interpolation`` setting."""
+    try:
+        return INTERPOLATION_ORDERS[str(interpolation).lower()]
+    except KeyError:
+        raise ValueError(f"density_sampling interpolation must be one of "
+                         f"{sorted(INTERPOLATION_ORDERS)}, got {interpolation!r}") from None
+
+
+def _spline_sample(data, points, order=3, margin=8):
+    """Sample ``data`` at fractional voxel ``points`` (n, 3) with a cubic B-spline.
+
+    Linear interpolation blurs most at points halfway between voxels, which at
+    ~1 nm/px is enough to merge a bilayer's two leaflets; a cubic spline does not add
+    that extra, position-dependent blur. Points outside the volume are NaN, exactly
+    as for linear sampling. Spline coefficients are computed only for the block of
+    the tomogram the points touch (plus ``margin`` voxels, past which a cubic
+    prefilter's influence has decayed below 1e-4), so memory scales with the surface's
+    extent rather than the whole tomogram.
+    """
+    from scipy import ndimage
+
+    shape = np.array(data.shape)
+    values = np.full(len(points), np.nan)
+    inside = np.all((points >= 0) & (points <= shape - 1), axis=1)
+    if not inside.any():
+        return values
+    pts = points[inside]
+    lo = np.maximum(np.floor(pts.min(axis=0)).astype(int) - margin, 0)
+    hi = np.minimum(np.ceil(pts.max(axis=0)).astype(int) + margin + 1, shape)
+    block = np.asarray(data[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]], dtype=np.float32)
+    coeffs = ndimage.spline_filter(block, order=order, output=np.float32, mode="mirror")
+    values[inside] = ndimage.map_coordinates(coeffs, (pts - lo).T, order=order,
+                                             prefilter=False, mode="mirror")
+    return values
+
+
+def interpolate(data, data_matrix, xyz, n_v, sample_spacing=0.25, angstroms=False, scan_range=10,
+                interpolation="cubic"):
     """
     Interpolate the values of the mrc data along each normal vector.
 
@@ -112,6 +153,9 @@ def interpolate(data, data_matrix, xyz, n_v, sample_spacing=0.25, angstroms=Fals
         If True, scale samples to angstroms
     scan_range : float
         Half-range in nm to scan along normal vectors (default: 10)
+    interpolation : str
+        "cubic" (default; cubic B-spline) or "linear" (trilinear, the only
+        behavior in earlier versions).
 
     Returns
     -------
@@ -137,8 +181,12 @@ def interpolate(data, data_matrix, xyz, n_v, sample_spacing=0.25, angstroms=Fals
     # top or bottom of a thin tomogram scan straight out of the volume, so this is a
     # routine case, not an edge case. Downstream, a profile containing NaN is
     # excluded from neighborhood averaging (see _thickness_worker.usable_profile_rows).
-    values_flat = interp.interpn(data_matrix, data, all_points_flat,
-                                 method="linear", bounds_error=False, fill_value=np.nan)
+    order = _interpolation_order(interpolation)
+    if order == 1:
+        values_flat = interp.interpn(data_matrix, data, all_points_flat,
+                                     method="linear", bounds_error=False, fill_value=np.nan)
+    else:
+        values_flat = _spline_sample(data, all_points_flat, order=order)
     # reshape (nsamples, n_tri) then transpose to (n_tri, nsamples)
     value_array = values_flat.reshape(nsamples, n_tri).T
 
@@ -154,7 +202,7 @@ def interpolate(data, data_matrix, xyz, n_v, sample_spacing=0.25, angstroms=Fals
 
 
 def sample_density_single(mrc_file, graph_file, sample_spacing=0.25, scan_range=10, angstroms=False,
-                          lowpass_sigma=0):
+                          lowpass_sigma=0, interpolation="cubic"):
     """
     Sample density values for a single graph file.
 
@@ -175,6 +223,8 @@ def sample_density_single(mrc_file, graph_file, sample_spacing=0.25, scan_range=
     lowpass_sigma : float
         Sigma in nm for 3D Gaussian low-pass filter applied to tomogram before
         sampling. Set to 0 to disable filtering (default: 0).
+    interpolation : str
+        "cubic" (default) or "linear"; see :func:`interpolate`.
 
     Returns
     -------
@@ -199,7 +249,7 @@ def sample_density_single(mrc_file, graph_file, sample_spacing=0.25, scan_range=
     # Sample density along normals
     value_array = interpolate(data, data_matrix, xyz, n_v,
                               sample_spacing=sample_spacing, angstroms=angstroms,
-                              scan_range=scan_range)
+                              scan_range=scan_range, interpolation=interpolation)
 
     # Generate x positions
     nsamples = int(2 * scan_range / sample_spacing) + 1
@@ -210,7 +260,8 @@ def sample_density_single(mrc_file, graph_file, sample_spacing=0.25, scan_range=
     return value_array, x_positions, voxsize
 
 
-def sample_density_for_tomogram(filename, work_dir, angstroms=False, sample_spacing=0.25, scan_range=10, radius_hit=None):
+def sample_density_for_tomogram(filename, work_dir, angstroms=False, sample_spacing=0.25, scan_range=10, radius_hit=None,
+                                interpolation="cubic"):
     """
     Sample density values from a tomogram along surface normal vectors.
 
@@ -228,6 +279,8 @@ def sample_density_for_tomogram(filename, work_dir, angstroms=False, sample_spac
         Half-range in nm to scan along normal vectors
     radius_hit : int or None
         If specified, only process files with this radius_hit value
+    interpolation : str
+        "cubic" (default) or "linear"; see :func:`interpolate`.
     """
     mrcbase = filename.split(".mrc")[0].split("/")[-1]
     print(f"Processing {mrcbase}")
@@ -249,7 +302,8 @@ def sample_density_for_tomogram(filename, work_dir, angstroms=False, sample_spac
         print(f"Processing {file}")
         value_array, positions, voxsize = sample_density_single(
             filename, file,
-            sample_spacing=sample_spacing, scan_range=scan_range, angstroms=angstroms
+            sample_spacing=sample_spacing, scan_range=scan_range, angstroms=angstroms,
+            interpolation=interpolation
         )
         # Save the interpolated values to a csv file (same basename as .gt file)
         header = ",".join([f"{p:.4f}" for p in positions])
@@ -308,6 +362,8 @@ def run_sample_density(configfile, mrcfile=None, sample_spacing_override=None, s
     # Set sampling parameters (CLI overrides take precedence)
     sample_spacing = sample_spacing_override if sample_spacing_override is not None else density_config.get("sample_spacing", 0.25)
     scan_range = scan_range_override if scan_range_override is not None else density_config.get("scan_range", 10)
+    interpolation = density_config.get("interpolation", "cubic")
+    _interpolation_order(interpolation)  # fail fast on a typo, before any tomogram loads
     nsamples = int(2 * scan_range / sample_spacing) + 1
 
     # Warn if sample_spacing doesn't divide evenly into scan_range
@@ -322,6 +378,7 @@ def run_sample_density(configfile, mrcfile=None, sample_spacing_override=None, s
     print(f"  Sample spacing: {sample_spacing} nm")
     print(f"  Scan range: {scan_range} nm")
     print(f"  N samples: {nsamples} (computed from spacing and range)")
+    print(f"  Interpolation: {interpolation}")
     if radius_hit:
         print(f"  Radius hit: {radius_hit}")
 
@@ -340,7 +397,8 @@ def run_sample_density(configfile, mrcfile=None, sample_spacing_override=None, s
     # Process each MRC file
     for mrc in mrcs:
         sample_density_for_tomogram(mrc, work_dir, angstroms=angstroms, sample_spacing=sample_spacing,
-                                    scan_range=scan_range, radius_hit=radius_hit)
+                                    scan_range=scan_range, radius_hit=radius_hit,
+                                    interpolation=interpolation)
 
 
 if __name__ == "__main__":
