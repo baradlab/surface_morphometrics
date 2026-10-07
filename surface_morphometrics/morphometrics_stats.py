@@ -282,6 +282,11 @@ def pairwise_tests(datasets, labels, include_ks=True, ns="ns", na="n/a"):
                     u, p_u = stats.mannwhitneyu(a, b, alternative="two-sided")
                 except ValueError:
                     u, p_u = np.nan, np.nan
+                # Every value tied across both groups: no difference to detect, p = 1.
+                # (scipy >= 1.18 returns NaN here; older versions returned 1.0.)
+                if not np.isfinite(p_u) and len(a) and len(b) and \
+                        np.unique(np.concatenate([a, b])).size == 1:
+                    u, p_u = len(a) * len(b) / 2.0, 1.0
                 try:
                     t, p_t = stats.ttest_ind(a, b, equal_var=False)   # Welch
                 except (ValueError, ZeroDivisionError):

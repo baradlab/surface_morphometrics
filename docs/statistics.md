@@ -71,7 +71,7 @@ statistics, **not** the pooled triangle distributions (which need the correction
 - `significance_stars(p, ns=, na=)` — one place for the `****/***/**/*` thresholds.
 - `statistics(...)` — the legacy paper-figure function (violins + a pairwise CSV). It now
   delegates the tests to `pairwise_tests`; its CSV output is otherwise unchanged
-  (pinned byte-for-byte by golden tests).
+  (pinned by golden tests).
 - `ks_statistics(...)` — the legacy distribution-level KS with the effective-n correction
   (`pmito`, `prad`). Kept as-is; see the N_eff discussion below.
 - `bootstrap(...)` — **deprecated for confidence intervals** (see CIs below).
@@ -360,5 +360,5 @@ summarized in `PLAN_stats_refactor.md` (Phase 4 calibration, robustness sweep, N
 sensitivity; Phase 3 estimator validation; Phase 5 bootstrap coverage). The library's own
 correctness is covered by `tests/test_spatial_stats.py`,
 `tests/test_feature_violin.py`, and the golden-file characterization tests in
-`tests/test_statistics_golden.py` (which pin `statistics()`'s CSV output byte-for-byte, so
+`tests/test_statistics_golden.py` (which pin `statistics()`'s CSV output cell for cell, so
 the refactor could be shown not to change any number for existing callers).

@@ -112,7 +112,8 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
   - `cluster_t_interval` / `cluster_bootstrap` — confidence intervals that resample /
     summarize whole tomograms (coverage ~0.86 / ~0.77 at nominal 0.90, vs ~0.20 for the
     i.i.d. triangle bootstrap).
-- Golden-file characterization tests pinning `statistics()`'s CSV output byte-for-byte.
+- Golden-file characterization tests pinning `statistics()`'s CSV output (raw stats byte-for-byte; pairwise rows cell for
+  cell, numbers to 1e-12, so last-digit float noise across scipy versions passes).
 
 ### Changed
 - Factored the pairwise significance testing out of the violin command into a shared
@@ -131,6 +132,9 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
   order is unchanged, so positional readers are unaffected.
 
 ### Fixed
+- `pairwise_tests` reports Mann-Whitney p = 1 ("ns") when every value in both groups is
+  identical. scipy >= 1.18 returns NaN there (older versions returned 1.0), which would
+  have turned those cells into "n/a" depending on the installed scipy.
 - `permutation_test`'s `min_possible_p` (the permutation floor) was 2 / C(n, n_a) for
   every design; that is only right for equal group sizes. For unequal sizes it is
   1 / C(n, n_a), so the floor was overstated 2x (and `AT FLOOR` flags could trigger on

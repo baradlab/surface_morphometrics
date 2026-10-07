@@ -66,12 +66,30 @@ def test_rawstats_byte_identical(tmp_path):
         assert f.read() == g.read()
 
 
-def test_pairwise_data_rows_byte_identical(tmp_path):
+def _cells_match(got, gold, rel=1e-12):
+    """Text cells must match exactly; numeric cells to `rel` (last-digit float noise
+    differs across numpy/scipy versions, e.g. a KS D of 1/6 printed as ...666 or ...674)."""
+    try:
+        g, h = float(got), float(gold)
+    except ValueError:
+        return got == gold
+    if g != g or h != h:                       # NaN
+        return g != g and h != h
+    return abs(g - h) <= rel * max(1.0, abs(h))
+
+
+def test_pairwise_data_rows_match_golden(tmp_path):
     pairwise, _rawstats = _run(tmp_path)
-    got = open(pairwise).read().splitlines(keepends=True)
-    gold = open(f"{GOLD}/statistics_pairwise.csv").read().splitlines(keepends=True)
-    # Every data row (everything after the header) must be byte-identical.
-    assert got[1:] == gold[1:]
+    got = open(pairwise).read().splitlines()
+    gold = open(f"{GOLD}/statistics_pairwise.csv").read().splitlines()
+    # Every data row (everything after the header) must match cell for cell: same
+    # columns, same text, numbers equal to ~1e-12.
+    assert len(got) == len(gold)
+    for row_got, row_gold in zip(got[1:], gold[1:]):
+        cells_got, cells_gold = row_got.split(","), row_gold.split(",")
+        assert len(cells_got) == len(cells_gold)
+        assert all(_cells_match(a, b) for a, b in zip(cells_got, cells_gold)), \
+            (row_got, row_gold)
 
 
 def test_pairwise_header_matches_expected(tmp_path):
