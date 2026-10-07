@@ -46,11 +46,13 @@ distance_and_orientation_measurements:
 density_sampling:
   sample_spacing: 0.25  # Distance in nm between samples along normal vectors. Should divide evenly into scan_range.
   scan_range: 10  # Half-range in nm to scan along normal vectors (scans from -scan_range to +scan_range)
+  interpolation: cubic  # cubic (default) or linear. Linear interpolation adds extra blur between voxels that can merge bilayer leaflets at ~1 nm/px; use linear only to reproduce results from earlier versions (which always sampled linearly). Used by sample_density and refine_mesh.
 
 # THICKNESS MEASUREMENTS (used by measure_thickness.py)
 thickness_measurements:
   average_radius: 12  # Radius in nm for local averaging in thickness calculations
   fit_curve: true  # Fit dual gaussian to estimate thickness
+  force_bilayer_prior: false  # Expert option. If the surface-average profile shows one merged peak (leaflets unresolved, e.g. at ~1 nm/px), fit it as a bilayer anyway so merged triangles can be recovered. Recovered values are lower-confidence and flagged 1 in the forced_bilayer_prior column. Prefer sampling a less-binned tomogram.
   components:  # Components to process for thickness measurements
     - OMM
     - IMM

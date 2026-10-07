@@ -52,7 +52,7 @@ from ._thickness_worker import (init_worker, fit_triangle_chunk_offsets,
                                init_local_thickness_worker, compute_thickness_chunk,
                                _dual_gaussian_centered, _dual_gaussian_shared_width,
                                _seed_bilayer_center, _symmetric_fit_window,
-                               MIN_THICKNESS, MAX_THICKNESS)
+                               radius_neighbors, MIN_THICKNESS, MAX_THICKNESS)
 # NOTE: curvature.run_pycurv is invoked in a subprocess (see run_pycurv_refinement),
 # not imported here, so pycurv runs in a clean process rather than inheriting this
 # one's memory state.
@@ -80,13 +80,10 @@ def compute_local_thicknesses_parallel(value_array, xyz, x_positions, average_ra
     np.ndarray
         Array of thickness values (np.nan for failed fits)
     """
-    from scipy import spatial
-
     num_triangles = len(value_array)
-    tree = spatial.cKDTree(xyz)
 
     # Batch query all neighbors
-    distances, neighbors = tree.query(xyz, k=500, distance_upper_bound=average_radius, workers=-1)
+    distances, neighbors = radius_neighbors(xyz, average_radius)
 
     # Set up multiprocessing
     ctx = mp.get_context('spawn')
@@ -179,9 +176,8 @@ def compute_triangle_offsets(graph, sampling_data, x_positions, average_radius, 
         (offsets, sigmas1, sigmas2) - Arrays of center offsets and Gaussian widths.
         For monolayer or xcorr mode, sigmas2 will be NaN.
     """
-    # Get coordinates and build KD-tree for local averaging
+    # Get coordinates for local averaging
     xyz = graph.vp.xyz.get_2d_array([0, 1, 2]).transpose()
-    xyztree = spatial.cKDTree(xyz)
 
     num_triangles = len(sampling_data)
     thickness_arr = sampling_data.to_numpy()
@@ -212,7 +208,7 @@ def compute_triangle_offsets(graph, sampling_data, x_positions, average_radius, 
 
     # Batch KDTree query - query all points at once
     print(f"  Running batch KDTree query for {num_triangles} triangles...")
-    distances, neighbor_indices = xyztree.query(xyz, k=500, distance_upper_bound=average_radius, workers=-1)
+    distances, neighbor_indices = radius_neighbors(xyz, average_radius)
 
     if use_xcorr:
         # Serial processing for xcorr - faster than multiprocessing for simple computation
@@ -805,7 +801,8 @@ def build_lightweight_graph(surf, output_gt_path):
 
 def finalize_surface_with_pycurv(surface_vtp, mrc_file, output_base, pixel_size,
                                  radius_hit, sample_spacing, scan_range, angstroms,
-                                 cores, average_radius, compute_thickness=True):
+                                 cores, average_radius, compute_thickness=True,
+                                 interpolation="cubic"):
     """Run full pycurv on the final round of refinement to produce its curvature.
 
     Intermediate refinement iterations skip pycurv (they build fast lightweight
@@ -830,6 +827,8 @@ def finalize_surface_with_pycurv(surface_vtp, mrc_file, output_base, pixel_size,
     compute_thickness : bool
         If True, also measure the local thickness distribution on the finalized
         surface (for the convergence histogram).
+    interpolation : str
+        Density sampling interpolation, "cubic" or "linear" (see sample_density).
 
     Returns
     -------
@@ -859,7 +858,8 @@ def finalize_surface_with_pycurv(surface_vtp, mrc_file, output_base, pixel_size,
         print("Computing local thickness distribution on the finalized surface...")
         refined_value_array, refined_x_positions, _ = sample_density_single(
             mrc_file, graph_file,
-            sample_spacing=sample_spacing, scan_range=scan_range, angstroms=angstroms)
+            sample_spacing=sample_spacing, scan_range=scan_range, angstroms=angstroms,
+            interpolation=interpolation)
         rtg = TriangleGraph()
         rtg.graph = load_graph(graph_file)
         refined_xyz = rtg.graph.vp.xyz.get_2d_array([0, 1, 2]).transpose()
@@ -885,7 +885,7 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
                           smooth_offsets=True, offset_smoothing_radius=None,
                           laplacian_iterations=0, laplacian_lambda=0.5, lowpass_sigma=0,
                           run_full_pycurv=True, warn_intermediate=True,
-                          compute_thickness=False):
+                          compute_thickness=False, interpolation="cubic"):
     """
     Perform a single iteration of mesh refinement.
 
@@ -945,6 +945,8 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
         follows, so the final round (which pycurv runs on immediately) stays quiet.
     compute_thickness : bool
         If True, compute local thickness distribution for all triangles (slow ~2 min).
+    interpolation : str
+        Density sampling interpolation, "cubic" or "linear" (see sample_density).
         Only needed on the final iteration for the convergence histogram.
 
     Returns
@@ -966,7 +968,7 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
     value_array, x_positions, voxsize = sample_density_single(
         mrc_file, graph_file,
         sample_spacing=sample_spacing, scan_range=scan_range, angstroms=angstroms,
-        lowpass_sigma=iter_lowpass_sigma
+        lowpass_sigma=iter_lowpass_sigma, interpolation=interpolation
     )
     # Convert to DataFrame with position headers
     header = [f"{p:.4f}" for p in x_positions]
@@ -1107,7 +1109,8 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
     print("Sampling density from refined surface for profile plot...")
     refined_value_array, refined_x_positions, _ = sample_density_single(
         mrc_file, new_graph_file,
-        sample_spacing=sample_spacing, scan_range=scan_range, angstroms=angstroms
+        sample_spacing=sample_spacing, scan_range=scan_range, angstroms=angstroms,
+        interpolation=interpolation
     )
 
     # Compute global average profile from the refined surface
@@ -1151,10 +1154,8 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
 
     n_sample = min(50, len(refined_value_array))
     sample_indices = np.random.choice(len(refined_value_array), n_sample, replace=False)
-    sample_tree = spatial.cKDTree(refined_xyz)
-    sample_distances, sample_neighbors = sample_tree.query(
-        refined_xyz[sample_indices], k=500, distance_upper_bound=average_radius, workers=-1
-    )
+    sample_distances, sample_neighbors = radius_neighbors(
+        refined_xyz, average_radius, query_xyz=refined_xyz[sample_indices])
 
     sample_profiles = []
     for i in range(n_sample):
@@ -1302,6 +1303,7 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
     average_radius_min = refinement_config.get("average_radius_min", 3.0)  # Minimum radius
     sample_spacing = density_config.get("sample_spacing", 0.25)
     scan_range = density_config.get("scan_range", 10)
+    interpolation = density_config.get("interpolation", "cubic")
     angstroms = config.get("surface_generation", {}).get("angstroms", False)
     cores = config.get("cores", 6)
 
@@ -1352,6 +1354,7 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
     print(f"  Iterations: {iterations}")
     print(f"  Damping factor: {damping_factor}")
     print(f"  Average radius: {average_radius} nm")
+    print(f"  Density interpolation: {interpolation}")
     if average_radius_decay < 1.0:
         print(f"  Average radius decay: {average_radius_decay} (min: {average_radius_min} nm)")
     print(f"  Radius hit: {radius_hit}")
@@ -1463,7 +1466,8 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
                 print("Sampling initial density profile...")
                 init_value_array, init_x_positions, _ = sample_density_single(
                     mrc_file, current_graph,
-                    sample_spacing=sample_spacing, scan_range=scan_range, angstroms=angstroms
+                    sample_spacing=sample_spacing, scan_range=scan_range, angstroms=angstroms,
+                    interpolation=interpolation
                 )
                 # Compute normalized average profile
                 init_profiles = init_value_array * -1
@@ -1480,10 +1484,8 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
 
                 n_sample = min(50, len(init_value_array))
                 init_sample_indices = np.random.choice(len(init_value_array), n_sample, replace=False)
-                init_tree = spatial.cKDTree(init_xyz)
-                init_sample_dist, init_sample_neighbors = init_tree.query(
-                    init_xyz[init_sample_indices], k=500, distance_upper_bound=average_radius, workers=-1
-                )
+                init_sample_dist, init_sample_neighbors = radius_neighbors(
+                    init_xyz, average_radius, query_xyz=init_xyz[init_sample_indices])
 
                 init_sample_profiles = []
                 for i in range(n_sample):
@@ -1622,7 +1624,8 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
                         lowpass_sigma=lowpass_sigma,
                         run_full_pycurv=False,
                         warn_intermediate=False,
-                        compute_thickness=False
+                        compute_thickness=False,
+                        interpolation=interpolation
                     )
 
                     stats['iteration'] = iter_num
@@ -1746,7 +1749,8 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
                     fin = finalize_surface_with_pycurv(
                         current_vtp, mrc_file, iter_output_base, pixel_size,
                         radius_hit, sample_spacing, scan_range, angstroms, cores,
-                        current_avg_radius, compute_thickness=True)
+                        current_avg_radius, compute_thickness=True,
+                        interpolation=interpolation)
                     final_entry = iteration_stats[-1]
                     final_entry['graph_file'] = fin['graph_file']
                     final_entry['surface_file'] = fin['surface_file']
