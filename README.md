@@ -37,6 +37,7 @@ The fastest, easiest starting point for most Linux boxes, and now for Mac as wel
 2. Create the environment (this also installs the toolkit and the `morphometrics` command via `pip install -e .`): `conda env create -f environment.yml`
 3. Activate it: `conda activate morphometrics`
 4. Check the install: `morphometrics --help` should list the pipeline subcommands.
+5. To set up the gui, from the morphometrics folder run `pip install -e .[gui]`
 
 > Older Ubuntu installs (and some other Linux distributions) have known issues with graph-tool. If the main environment file fails, try `conda env create -f environment-ubuntu.yml` instead (tested on Ubuntu 22.04 LTS).
 

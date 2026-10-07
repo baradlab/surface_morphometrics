@@ -4,7 +4,7 @@ All notable changes to the Surface Morphometrics toolkit are documented here.
 This project loosely follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
-## [2.0.0b6] — beta
+## [2.0.0b7] — beta (unreleased)
 
 Statistics and plotting: a cross-tomogram violin command, a unified pairwise
 significance tester, and spatially-aware comparison tools that treat the tomogram
@@ -140,6 +140,93 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
 - `morphometrics_stats.bootstrap` documented as deprecated for confidence intervals
   (i.i.d. triangle resampling assumes independence and under-covers badly); points at the
   `spatial_stats` cluster methods.
+
+## [2.0.0b6] — beta (unreleased)
+
+Mesh generation decoupled from pycurv, in preparation for extracting it into a
+standalone importable library.
+
+### Added
+- First test coverage for the meshing path beyond `mrc2xyz`. `tests/test_xyz2ply.py`
+  (skipped when pymeshlab is unavailable) checks that Screened Poisson reconstructs a
+  known sphere shell, that isotropic remeshing hits the requested triangle area, that a
+  degenerate point cloud reports failure, and that every `xyz2ply` command-line option
+  reaches `xyz_to_ply`. `tests/test_mesh_wiring.py` needs neither pymeshlab nor vtk, so
+  it runs in CI: it pins that every `surface_generation` setting reaches the meshing
+  subprocess carrying its configured value, and that every documented setting has a
+  consumer — the two guards that would have caught the inert `ultrafine` below.
+- `tests/test_version.py` pins `surface_morphometrics.__version__` to `pyproject.toml`'s
+  `version`. The two had drifted apart twice (fixed in 2.0.0b3, drifted again at
+  2.0.0b5) because a release bumps one and forgets the other.
+
+### Changed
+- `vtk` is now a declared dependency in `pyproject.toml` (`vtk>=9`). It was always
+  required — `ply2vtp`, `export_obj`, and `refine_mesh` all use it — but was only ever
+  installed as a side effect of the conda environment, so a plain `pip install` produced
+  a package that failed at runtime. It is pip-resolvable, so it belongs with the pip
+  dependencies rather than with the conda-only ones.
+- Mesh generation no longer depends on pycurv. `ply2vtp` imported `pycurv_io` and
+  `scipy.ndimage.morphology.distance_transform_edt` without ever referencing either;
+  the pycurv import was the only thing coupling the segmentation → mesh path to
+  pycurv/graph-tool. The three meshing stages now need only mrcfile, numpy, pandas,
+  pymeshlab, and vtk.
+- `ply2vtp` imports vtk inside `ply_to_vtp` rather than at module scope, as `export_obj`
+  already does, so `segmentation_to_meshes` can be imported without vtk installed.
+- Dropped the pymeshlab 2022.2.post3 `PercentageValue` compatibility shim, whose only
+  user was the removed `ultrafine` branch. This also removes an undeclared dependency on
+  `importlib_metadata`; `environment.yml` already requires pymeshlab >= 2023.12.
+
+### Removed
+- `surface_generation.ultrafine`, superseded by isotropic remeshing (`isotropic_remesh` /
+  `target_area`) and by density-guided mesh refinement. It had also been inert for some
+  time, by two independent paths: `run_xyz_to_ply` never passed `--ultrafine` to the
+  meshing subprocess, and `xyz2ply`'s own click wrapper never forwarded it either, so
+  only a direct Python call could reach the branch. Meshing output is unchanged. Configs
+  that still set the key keep loading without error.
+
+### Fixed
+- **Density samples outside the tomogram were extrapolated instead of reported as
+  missing.** `sample_density` called `interpn(..., fill_value=None)`, which is scipy's
+  *extrapolate* setting, not its NaN default — so a linescan running off the edge of the
+  volume produced invented values (linear extrapolation from the edge is unbounded) that
+  the thickness fitter could not distinguish from real density. This is a routine case,
+  not an edge case: the default scan range is ±10 nm along the normal, tomograms are thin
+  in z, and a membrane lying flat near the top or bottom of the volume scans straight out
+  of it. Out-of-bounds samples are now NaN, and `sample_density` reports how many
+  triangles are affected.
+  - Profiles containing NaN are excluded from neighborhood averaging
+    (`_thickness_worker.usable_profile_rows`) at all three sites that average over
+    neighbors. Without this the fix would have made things worse: a *single*
+    out-of-bounds neighbor turned the weighted average NaN and destroyed the measurement
+    for a triangle that was itself well inside the volume. Verified — a good triangle
+    with one bad neighbor now measures correctly where it previously returned NaN.
+  - A triangle with no usable neighbors reports NaN thickness, which is what the rest of
+    the thickness code already expects, rather than a confident number from data that
+    does not exist.
+  - In `refine_mesh`, such a triangle is marked a failed fit so the existing
+    neighbor-interpolation stage fills its offset in from triangles that did fit. A final
+    guard replaces any non-finite offset with zero before vertices are displaced, since a
+    NaN offset would move a vertex to NaN and corrupt the mesh irrecoverably.
+  - `morphometrics_stats.histogram` no longer raises on unmeasured data. An all-NaN
+    series previously reached matplotlib's range autodetection and threw
+    `ValueError: autodetected range of [nan, nan] is not finite` — at the very end of
+    `measure_thickness`, after every per-surface computation and most output files were
+    already written. Non-finite values and their paired areas are now dropped per series,
+    a series with nothing measured is omitted (with a message naming it), and a plot with
+    no measured data at all is skipped rather than crashing. Verified that dropping them
+    leaves the area-weighted density unchanged, since they leave both the bin counts and
+    the normalization. This protects every caller, not just thickness.
+  - `measure_thickness` warns, naming the file, when a surface yields no thickness at
+    all, pointing at a surface outside its tomogram or a mismatched tomogram pairing —
+    previously this surfaced only as a silently missing series in the summary plots.
+  - **This changes results near tomogram boundaries**: thickness values that were
+    previously derived from extrapolated density are now NaN. Expect fewer measured
+    triangles at the top and bottom of thin tomograms, and treat prior thickness
+    distributions from such regions as unreliable.
+- `ply2vtp.ply_to_vtp` raised `NameError` when the vtp write failed: the error branch
+  called `pexceptions.PySegInputError` but `pexceptions` was never imported, so the
+  function's only error path was broken. It now raises `RuntimeError`.
+- Removed a stray `print("open")` from `ply_to_vtp` that leaked into `make_meshes` output.
 
 ## [2.0.0b5] — beta
 
@@ -311,6 +398,7 @@ how the toolkit is invoked.
 - README reorganized (Installation / Quick start / Pipeline / Analysis &
   visualization / Reference / Upgrading) with a table of contents.
 
+[2.0.0b7]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b6]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b5]: https://github.com/baradlab/surface_morphometrics/releases
 [2.0.0b4]: https://github.com/baradlab/surface_morphometrics/releases

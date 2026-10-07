@@ -25,7 +25,6 @@ DEFAULTS = {
     "cores": 6,
     "surface_generation": {
         "angstroms": False,
-        "ultrafine": False,
         "extrapolation_distance": 1.5,
         "isotropic_remesh": True,
         "target_area": 1.0,

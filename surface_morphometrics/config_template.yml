@@ -12,7 +12,6 @@ cores: 6 # Number of cores to use for parallel processing.
 #SEGMENTATION TO MESH 
 surface_generation:
   angstroms: false # Default scaling adjusts so surfaces are nm-scaled, if set to true surfaces are not rescaled and remain angstrom-scaled.
-  ultrafine: false # Not necessary under normal conditions but may help with unusually challenging membranes. Uses additional subdivision and resampling before cropping.
   extrapolation_distance: 1.5 # Distance in nm (or angstroms, if angstrom setting is True) to extrapolate the surface
   isotropic_remesh: true # If true, applies isotropic remeshing to create near-equilateral triangles with target average area.
   target_area: 1.0 # Target average triangle area in square units (nm^2 by default). Used when isotropic_remesh is true. Values between 1.0 and 3.0 generally yield good results, but smaller triangles significantly increase computation time.

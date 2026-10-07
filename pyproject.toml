@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "surface-morphometrics"
-version = "2.0.0b6"
+version = "2.0.0b7"
 description = "Quantification of membrane surfaces segmented from cryo-ET or other volumetric imaging."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -38,6 +38,10 @@ dependencies = [
     "ruamel.yaml",
     "click",
     "mrcfile",
+    # Mesh IO/geometry: imported lazily (inside functions) by ply2vtp, export_obj,
+    # refine_mesh and others, so it is pip-resolvable and belongs here rather than
+    # with the conda-only packages above.
+    "vtk>=9",
     "starfile",
     "tqdm",
 ]

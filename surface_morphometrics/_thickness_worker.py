@@ -29,6 +29,19 @@ MAX_CENTER_DISAGREEMENT = 0.7     # nm; dual center must agree with a single-Gau
 PINNED_THICKNESS_EPS = 0.15       # nm above MIN_THICKNESS; reject floor-pinned (fully merged) fits
 
 
+def usable_profile_rows(profiles):
+    """Which density profiles are fully inside the tomogram, as a boolean mask.
+
+    ``sample_density`` writes NaN for samples that fall outside the tomogram, so a
+    row containing any NaN is a linescan that ran off the edge of the volume. Such a
+    profile cannot be fitted, and averaging it into a neighborhood would propagate
+    the damage to triangles that are themselves fine -- so every site that averages
+    profiles over neighbors filters with this first.
+    """
+    profiles = np.atleast_2d(profiles)
+    return np.all(np.isfinite(profiles), axis=1)
+
+
 def _monogaussian(x, h, c, w):
     """Single gaussian function."""
     return h * np.exp(-(x - c)**2 / (2 * w**2))
@@ -405,6 +418,14 @@ def compute_thickness_chunk(indices):
 
         l = _lt_distances[i][valid_mask]
         neighbors = _lt_neighbors[i][valid_mask]
+
+        # Drop neighbors whose linescan left the tomogram; if none are usable the
+        # triangle simply has no measurement.
+        inside = usable_profile_rows(_lt_value_array[neighbors])
+        if not np.any(inside):
+            results.append(np.nan)
+            continue
+        l, neighbors = l[inside], neighbors[inside]
         weights = 1.0 / (1.0 + l)
 
         dat = np.average(_lt_value_array[neighbors], weights=weights, axis=0) * -1
@@ -510,6 +531,15 @@ def fit_triangle_chunk(indices):
         if len(neighbors) == 0:
             results.append((np.nan, 0, np.nan))
             continue
+
+        # Drop neighbors whose linescan left the tomogram (NaN samples). Without
+        # this, one out-of-bounds neighbor makes the whole weighted average NaN and
+        # a triangle that is itself well inside the volume loses its measurement.
+        inside = usable_profile_rows(_worker_thickness_arr[neighbors])
+        if not np.any(inside):
+            results.append((np.nan, 0, np.nan))
+            continue
+        l, neighbors = l[inside], neighbors[inside]
 
         weights = 1.0 / (1.0 + l)
 

@@ -548,6 +548,17 @@ def run_measure_thickness(config, output_dir=None, noise_samples=0, noise_seed=0
                         row.update({f"{qty}_{k}": v for k, v in res.items()})
                     noise_rows.append(row)
 
+                # A surface whose linescans all left the tomogram yields no thickness at
+                # all; say so, naming the file, rather than letting it show up only as a
+                # silently missing series in the summary plots.
+                measured = int(np.count_nonzero(np.isfinite(np.asarray(per_surface_thickness,
+                                                                       dtype=float))))
+                if measured == 0:
+                    print(f"  WARNING: no thickness could be measured for "
+                          f"{os.path.basename(filename)}. If this is unexpected, check that "
+                          "the surface lies inside its tomogram and that the right tomogram "
+                          "is paired with it.")
+
                 thickness_measurements[component].extend(per_surface_thickness)
                 area_measurements[component].extend(norm_areas)
                 widths[component].append(width)

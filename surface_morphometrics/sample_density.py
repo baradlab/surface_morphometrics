@@ -131,14 +131,25 @@ def interpolate(data, data_matrix, xyz, n_v, sample_spacing=0.25, angstroms=Fals
     # shape: (nsamples, n_tri, 3) → flatten to (nsamples*n_tri, 3)
     all_points_flat = all_points.reshape(-1, 3)
 
+    # fill_value=np.nan (NOT None, which would extrapolate): a sample outside the
+    # tomogram has no measured density, and linear extrapolation from the edge is
+    # unbounded, so it would silently invent values. Membranes lying flat near the
+    # top or bottom of a thin tomogram scan straight out of the volume, so this is a
+    # routine case, not an edge case. Downstream, a profile containing NaN is
+    # excluded from neighborhood averaging (see _thickness_worker.usable_profile_rows).
     values_flat = interp.interpn(data_matrix, data, all_points_flat,
-                                 method="linear", bounds_error=False, fill_value=None)
+                                 method="linear", bounds_error=False, fill_value=np.nan)
     # reshape (nsamples, n_tri) then transpose to (n_tri, nsamples)
     value_array = values_flat.reshape(nsamples, n_tri).T
 
-    print(np.mean(value_array[:, nsamples // 2]))
-    print(value_array.shape)
-    print(xyz.shape)
+    outside = ~np.isfinite(value_array)
+    if outside.any():
+        partly = np.count_nonzero(outside.any(axis=1))
+        wholly = np.count_nonzero(outside.all(axis=1))
+        print(f"  {partly} of {n_tri} triangles ({100.0 * partly / n_tri:.1f}%) have "
+              f"linescans reaching outside the tomogram; {wholly} fall outside entirely.")
+        print("  Those samples are NaN and are excluded from thickness measurement "
+              "rather than extrapolated.")
     return value_array
 
 
