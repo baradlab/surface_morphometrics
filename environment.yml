@@ -19,6 +19,7 @@ dependencies:
   - ruamel.yaml
   - click
   - mrcfile
+  - pyarrow
   # Visualization/notebooks
   - jupyter
   - napari

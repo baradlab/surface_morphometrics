@@ -116,6 +116,10 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
   cell, numbers to 1e-12, so last-digit float noise across scipy versions passes).
 
 ### Changed
+- `pyarrow` is now a declared dependency (`pyproject.toml`, both environment files). It
+  backs the `Dataset` parquet parse-cache and was already installed everywhere as a
+  dependency of `starfile`; declaring it keeps the cache from depending on another
+  package's requirements. The cache itself stays opt-in (`statistics.cache`).
 - Factored the pairwise significance testing out of the violin command into a shared
   `morphometrics_stats.pairwise_tests()`, and rewrote `statistics()` to delegate to it
   (output verified byte-identical for existing callers).

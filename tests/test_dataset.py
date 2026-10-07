@@ -194,9 +194,6 @@ def test_surfaces_exists_only(tmp_path):
 
 # --- parquet parse-cache (phase 4) --------------------------------------------------
 
-pyarrow = pytest.importorskip("pyarrow")
-
-
 def test_resolve_cache_dir():
     assert Dataset._resolve_cache_dir(False, "/w/") is None
     assert Dataset._resolve_cache_dir(None, "/w/") is None

@@ -31,6 +31,9 @@ dependencies = [
     "numpy",
     "scipy",
     "pandas",
+    # Parquet I/O for the Dataset parse-cache (statistics.cache). Already pulled in by
+    # starfile; declared so the cache does not depend on another package's choices.
+    "pyarrow",
     "matplotlib>=3.8",
     "scikit-learn",
     "statsmodels",

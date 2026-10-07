@@ -39,7 +39,7 @@ statistics:
   filters: [IMM:OMM_dist>=20]      # triangle filters, ANDed
   exclude_tomograms: [UF3, TE1]    # names or globs
   min_triangles: 500
-  cache: true                      # parquet parse-cache for faster re-runs (needs pyarrow)
+  cache: true                      # parquet parse-cache for faster re-runs
 groups:
   condition:
     Tg:      [TF*, UF*]
@@ -390,8 +390,9 @@ Reading a large run's CSVs repeatedly is the slow part of iterating on an analys
 parsed surface to **parquet**, keyed by the source CSV's path/mtime/size. A later run
 reads the parquet instead of re-parsing the CSV — roughly **4× faster** on a
 400k-triangle surface, with parquet files about half the size. The key changes whenever a
-surface is re-run, so a stale cache is never used; if `pyarrow` is unavailable the cache
-degrades to a warning and analysis continues from the CSVs.
+surface is re-run, so a stale cache is never used. Parquet support comes from `pyarrow`, a
+regular dependency; if a cache write ever fails (e.g. an unwritable folder) the cache turns
+itself off with a note and analysis continues from the CSVs.
 
 ### Compatibility with older scripts
 
