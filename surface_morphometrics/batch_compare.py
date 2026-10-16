@@ -27,6 +27,8 @@ Works on a single run (`seg_dir`/`work_dir` + `groups:`) or on several runs fede
       pairs: [[A, B], [C, D]]       # optional: exactly these pairs (overrides reference),
                                     # e.g. treatment vs vehicle within each morphology
       separator_after: 1            # optional: dashed line after this violin
+      correction: holm              # optional: holm (default) | fdr_bh | bonferroni | none
+      correction_family: analysis   # optional: analysis (default) | batch
     analyses:
       - name: imm_omm_distance      # output file stem
         class: OMM
@@ -135,13 +137,22 @@ def collect(ds, feature, label, group, filters=None, split_components=False,
 
 def run_batch(ds, comparison, analyses, output_dir, only=None, conditions=None,
               split_components=False, reps=5000, seed=0, plots=True, base_filters=None,
-              log=print):
-    """Run every analysis; return (summary_df, tests_df) and write them to output_dir."""
+              correction="holm", correction_family="analysis", log=print):
+    """Run every analysis; return (summary_df, tests_df) and write them to output_dir.
+
+    p-values are adjusted for multiple comparisons with `correction` (see
+    `morphometrics_stats.adjust_pvalues`) over a family set by `correction_family`:
+    ``analysis`` -- the pairs tested within each analysis, separately per test and per
+    level (the default); ``batch`` -- every test of that kind across the whole run.
+    Raw p-values are kept; adjusted ones go in ``*_adj`` columns and drive the stars.
+    """
+    if correction_family not in ("analysis", "batch"):
+        raise ValueError("correction_family must be 'analysis' or 'batch'")
     from matplotlib.colors import to_rgba
 
     from . import surface_filters as sf
     from .feature_violin import summary_statistic
-    from .morphometrics_stats import histogram, pairwise_tests, violin
+    from .morphometrics_stats import apply_correction, histogram, pairwise_tests, violin
     from .spatial_stats import cluster_t_interval, permutation_test
 
     group = comparison.get("group", "condition")
@@ -161,6 +172,8 @@ def run_batch(ds, comparison, analyses, output_dir, only=None, conditions=None,
     log(f"Comparing {len(names)} condition(s) of '{group}': {', '.join(names)}")
     log(f"Unit of replication: {unit_word}"
         + (" (condition permuted at the tomogram level)" if split_components else ""))
+    log(f"Multiple-comparison correction: {correction}, within each "
+        + ("analysis" if correction_family == "analysis" else "whole batch (per test)"))
 
     summary_rows, test_rows = [], []
     for analysis in analyses:
@@ -223,10 +236,12 @@ def run_batch(ds, comparison, analyses, output_dir, only=None, conditions=None,
 
         wanted = _pairs(comparison, present, reference)
         wanted_set = {frozenset(p) for p in wanted}
-        for row in pairwise_tests(summaries, present):
-            if comparison.get("pairs") and \
-                    frozenset((row["class_a"], row["class_b"])) not in wanted_set:
-                continue
+        summary_tests = [row for row in pairwise_tests(summaries, present)
+                         if not comparison.get("pairs")
+                         or frozenset((row["class_a"], row["class_b"])) in wanted_set]
+        if correction_family == "analysis":
+            apply_correction(summary_tests, correction)
+        for row in summary_tests:
             row.update({"analysis": name, "level": f"per_{unit_word}_summary"})
             test_rows.append(row)
 
@@ -256,6 +271,7 @@ def run_batch(ds, comparison, analyses, output_dir, only=None, conditions=None,
                       custom_colors_light=[colors_light[i] for i in idx])
 
         ci_stat = analysis.get("ci_statistic", "mean")
+        perm_rows = []
         for a_name, b_name in pairs:
             sel = [i for i, c in enumerate(conds) if c in (a_name, b_name)]
             perm = permutation_test(
@@ -281,15 +297,6 @@ def run_batch(ds, comparison, analyses, output_dir, only=None, conditions=None,
                           if len(pooled) >= 2 else None)
 
             at_floor = perm["p_value"] <= perm["min_possible_p"] + 1e-12
-            log(f"  {a_name} vs {b_name}: KS={perm['observed']:.3f}  "
-                f"p={perm['p_value']:.4f} (floor {perm['min_possible_p']:.3g})"
-                + ("  <-- AT FLOOR: needs more tomograms" if at_floor else ""))
-            for n in (a_name, b_name):
-                ci = cis[n]
-                log(f"      {ci_stat} {n}: "
-                    + (f"{ci['estimate']:.4g} [{ci['ci_low']:.4g}, {ci['ci_high']:.4g}]"
-                       if ci else "n/a (<2 tomograms)"))
-
             row = {"analysis": name, "level": "pooled_distribution_permutation",
                    "class": label, "feature": feature, "filter": sf.describe(clauses),
                    "class_a": a_name, "class_b": b_name,
@@ -303,10 +310,34 @@ def run_batch(ds, comparison, analyses, output_dir, only=None, conditions=None,
                 row[f"mean_{tag}"] = ci["estimate"] if ci else np.nan
                 row[f"ci_{tag}_low"] = ci["ci_low"] if ci else np.nan
                 row[f"ci_{tag}_high"] = ci["ci_high"] if ci else np.nan
+            perm_rows.append((row, cis))
+
+        if correction_family == "analysis":
+            apply_correction([r for r, _ in perm_rows], correction, pcols=("p_permutation",))
+        for row, cis in perm_rows:
+            adj = (f", {correction}-adj {row['p_permutation_adj']:.4f}"
+                   if "p_permutation_adj" in row else "")
+            log(f"  {row['class_a']} vs {row['class_b']}: KS={row['ks']:.3f}  "
+                f"p={row['p_permutation']:.4f}{adj} (floor {row['p_floor']:.3g})"
+                + ("  <-- AT FLOOR: needs more tomograms" if row["at_floor"] else ""))
+            for n in (row["class_a"], row["class_b"]):
+                ci = cis[n]
+                log(f"      {ci_stat} {n}: "
+                    + (f"{ci['estimate']:.4g} [{ci['ci_low']:.4g}, {ci['ci_high']:.4g}]"
+                       if ci else "n/a (<2 tomograms)"))
             test_rows.append(row)
         if plots:
             import matplotlib.pyplot as plt
             plt.close("all")
+
+    if correction_family == "batch":
+        summary_level = [r for r in test_rows if r["level"].endswith("_summary")]
+        perm_level = [r for r in test_rows if r["level"] == "pooled_distribution_permutation"]
+        apply_correction(summary_level, correction)
+        apply_correction(perm_level, correction, pcols=("p_permutation",))
+        log(f"\nAdjusted by {correction} across the batch: {len(summary_level)} "
+            f"summary-level and {len(perm_level)} pooled-distribution comparisons "
+            "(see the *_adj columns in tests.csv).")
 
     summary = pd.DataFrame(summary_rows)
     tests = pd.DataFrame(test_rows)
@@ -333,10 +364,18 @@ def run_batch(ds, comparison, analyses, output_dir, only=None, conditions=None,
 @click.option("--output", default=None,
               help="Output directory (default: comparison.output, else "
                    "<config dir>/compare_batch/).")
+@click.option("--correction", type=click.Choice(["holm", "fdr_bh", "bonferroni", "none"]),
+              default=None,
+              help="Multiple-comparison correction (default: comparison.correction, "
+                   "else holm).")
+@click.option("--correction-family", type=click.Choice(["analysis", "batch"]), default=None,
+              help="Which tests are corrected together: the pairs within each analysis, "
+                   "or every test in the run (default: comparison.correction_family, "
+                   "else analysis).")
 @click.option("--no-plots", is_flag=True, default=False,
               help="Write only the CSV tables, no violin/histogram figures.")
 def compare_batch_cli(configfile, only, conditions, split_components, reps, seed, output,
-                      no_plots):
+                      correction, correction_family, no_plots):
     """Run every analysis in the config's `analyses:` list across its conditions.
 
     CONFIGFILE: a config with `comparison:` and `analyses:` blocks, plus either a
@@ -389,6 +428,14 @@ def compare_batch_cli(configfile, only, conditions, split_components, reps, seed
         if bad:
             raise click.ClickException(f"--conditions: unknown condition(s) {bad}")
 
+    from .morphometrics_stats import CORRECTIONS
+    corr = correction or comparison.get("correction", "holm")
+    fam = correction_family or comparison.get("correction_family", "analysis")
+    if corr not in CORRECTIONS:
+        raise click.ClickException(f"comparison.correction must be one of {CORRECTIONS}")
+    if fam not in ("analysis", "batch"):
+        raise click.ClickException("comparison.correction_family must be analysis or batch")
+
     stats_cfg = config.get("statistics", {}) or {}
     base_filters = stats_cfg.get("filters", []) if isinstance(stats_cfg, dict) else []
     config_dir = os.path.dirname(os.path.abspath(configfile))
@@ -397,7 +444,8 @@ def compare_batch_cli(configfile, only, conditions, split_components, reps, seed
               conditions=list(conditions) or None, split_components=split_components,
               reps=reps if reps is not None else comparison.get("reps", 5000),
               seed=seed if seed is not None else comparison.get("seed", 0),
-              plots=not no_plots, base_filters=base_filters)
+              plots=not no_plots, base_filters=base_filters,
+              correction=corr, correction_family=fam)
 
 
 if __name__ == "__main__":

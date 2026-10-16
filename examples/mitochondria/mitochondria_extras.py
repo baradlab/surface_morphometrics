@@ -24,8 +24,9 @@ import pandas as pd
 
 from surface_morphometrics.batch_compare import parse_conditions
 from surface_morphometrics.config_utils import load_config
-from surface_morphometrics.morphometrics_stats import (barchart, pairwise_tests,
-                                                       twod_histogram, violin)
+from surface_morphometrics.morphometrics_stats import (apply_correction, barchart,
+                                                       pairwise_tests, twod_histogram,
+                                                       violin)
 from surface_morphometrics.multidataset import load_for_analysis, split_stratum
 
 CONTACT_NM = 30          # ER contact-site distance threshold
@@ -76,6 +77,8 @@ def compare_per_tomogram(table, column, arms, pairs, colors, title, ylabel, out)
     wanted = {frozenset(p) for p in pairs}
     rows = [r for r in pairwise_tests(data, present)
             if frozenset((r["class_a"], r["class_b"])) in wanted]
+    # Correct over the pairs actually tested for this quantity (same as compare_batch).
+    apply_correction(rows, "holm")
     for r in rows:
         r["quantity"] = column
     return rows

@@ -108,13 +108,17 @@ def _available_groups(ds):
 @click.option("--conditions", nargs=2, default=None,
               help="The two buckets of GROUP to compare, when it has more than two "
                    "(e.g. --conditions Tg Vehicle).")
+@click.option("--correction", type=click.Choice(["holm", "fdr_bh", "bonferroni", "none"]),
+              default="holm", show_default=True,
+              help="Multiple-comparison correction across the membrane classes tested "
+                   "in this run (one permutation test per class).")
 @click.option("--reps", type=int, default=2000, show_default=True,
               help="Permutation replicates for the p-value.")
 @click.option("--seed", type=int, default=0, show_default=True, help="Permutation RNG seed.")
 @click.option("--output", default=None,
               help="Output CSV path (default: work_dir/<feature>_<group>_compare.csv).")
 def compare_cli(configfile, feature, group, statistic, filters, split_components,
-                component_column, conditions, reps, seed, output):
+                component_column, conditions, correction, reps, seed, output):
     """Compare FEATURE between the two conditions of a config GROUP, per membrane class.
 
     CONFIGFILE: path to config.yml. GROUP is a `groups:` block of the config -- or, for a
@@ -123,6 +127,7 @@ def compare_cli(configfile, feature, group, statistic, filters, split_components
     """
     from .multidataset import load_for_analysis
     from .surface_filters import parse_filters, describe
+    from .morphometrics_stats import apply_correction
     from .spatial_stats import permutation_test, cluster_t_interval
 
     config = load_config(configfile)
@@ -239,6 +244,11 @@ def compare_cli(configfile, feature, group, statistic, filters, split_components
     if not rows:
         raise click.ClickException(
             "no class had both conditions present; nothing to compare.")
+    # One permutation test per class: correct across them (the family is this run).
+    apply_correction(rows, correction, pcols=("p_value",))
+    if len(rows) > 1:
+        print(f"\n  p adjusted by {correction} across {len(rows)} classes: "
+              + ", ".join(f"{r['class']} {r['p_value_adj']:.3g}" for r in rows))
     out_dir = config.get("work_dir") or (os.path.dirname(os.path.abspath(configfile)) + "/")
     out_csv = output or f"{out_dir}{feature}_{group}_compare.csv"
     if not out_csv.endswith(".csv"):

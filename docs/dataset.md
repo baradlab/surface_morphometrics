@@ -281,6 +281,8 @@ comparison:
     - Mutant negative
     - Mutant positive
   reference: Control               # optional: test each condition vs this one only
+  correction: holm                 # optional: holm (default) | fdr_bh | bonferroni | none
+  correction_family: analysis      # optional: analysis (default) | batch
   # pairs: [[Veh-E, Tg-E], [Veh-F, Tg-F]]   # optional: exactly these pairs (overrides reference)
   separator_after: 2               # optional: dashed line after this violin
   reps: 5000                       # permutation replicates (default 5000)
@@ -320,6 +322,11 @@ cells of the design and list the comparisons you want in `pairs:`. The worked ex
 `mitochondria_statistics.py` this way: a study config for every feature comparison, plus a
 short script for per-tomogram quantities (surface areas, contact-site fractions) and 2D
 histograms.
+
+p-values are adjusted for multiple comparisons, by default with Holm over the pairs
+tested within each analysis; stars use the adjusted p and the raw p is kept. See
+[statistics.md](statistics.md#7-multiple-comparisons-adjust-within-a-stated-family) for
+choosing a method and family.
 
 Outputs, in the output folder: `summary.csv` (analysis × condition), `tests.csv` (one row
 per test, with a `level` column), and `<name>_violin.svg` / `<name>_hist.svg` figures

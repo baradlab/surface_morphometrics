@@ -69,6 +69,8 @@ statistics, **not** the pooled triangle distributions (which need the correction
 - `pairwise_tests(datasets, labels, ...)` — one shared pairwise tester (Mann-Whitney U,
   Welch t, and a summary-statistic KS) used by both the violin command and `statistics()`.
 - `significance_stars(p, ns=, na=)` — one place for the `****/***/**/*` thresholds.
+- `adjust_pvalues(p, method)` / `apply_correction(rows, method)` — multiple-comparison
+  correction (Holm, Benjamini-Hochberg, Bonferroni); see [Multiple comparisons](#7-multiple-comparisons-adjust-within-a-stated-family).
 - `statistics(...)` — the legacy paper-figure function (violins + a pairwise CSV). It now
   delegates the tests to `pairwise_tests`; its CSV output is otherwise unchanged
   (pinned by golden tests).
@@ -171,6 +173,52 @@ so a single large or triangle-dense tomogram cannot dominate. `cluster_t_interva
 this explicit; the summary statistics per surface are area-weighted.
 
 ---
+
+### 6. What the stars mean
+
+Stars are bins of a p-value: `****` p < 0.001, `***` p < 0.005, `**` p < 0.01,
+`*` p < 0.05, `ns` otherwise, `n/a` when the test is undefined (e.g. identical groups).
+These cutoffs are this project's long-standing convention and are **not** the common
+`*** < 0.001`, `**** < 0.0001` one, so state them in figure legends. Stars are only
+drawn for the per-tomogram summary tests (Mann-Whitney / Welch / summary KS); the
+pooled-distribution permutation rows report the p-value with its floor instead.
+
+### 7. Multiple comparisons: adjust within a stated family
+
+Every comparison is a chance for a false positive, and a study runs many: a 5-condition
+`compare_batch` with no `reference` is 10 pairs per analysis, times however many
+analyses. So `violin`, `compare` and `compare_batch` adjust p-values for multiple
+comparisons by default, and the stars use the **adjusted** p. Raw p-values are kept; the
+adjusted ones are written alongside (`mwu_p_adj`, `ttest_p_adj`, `ks_p_adj`,
+`p_value_adj`, `p_permutation_adj`), with `correction` and `n_comparisons` columns
+recording how.
+
+| Method (`--correction`) | Controls | Use when |
+|---|---|---|
+| `holm` *(default)* | family-wise error: the chance of **any** false positive | a handful of planned comparisons whose individual claims matter |
+| `fdr_bh` | false discovery rate: the expected **fraction** of false positives among the hits | screening many analyses for candidates |
+| `bonferroni` | family-wise error, more conservatively than Holm | reproducing an older analysis |
+| `none` | nothing | exploratory looks, or when correcting elsewhere |
+
+The **family** is the set of tests corrected together:
+
+- `violin`: every class pair in the figure.
+- `compare`: the membrane classes tested in one run (one permutation test each).
+- `compare_batch`: by default, the pairs tested within each analysis
+  (`comparison.correction_family: analysis`). Set `correction_family: batch` to correct
+  across every test in the run, the stricter choice when the analyses are one question
+  asked many ways rather than separate questions.
+
+MWU, Welch and KS are alternative tests of the same pairs, so each is corrected
+separately rather than pooled into one family, and the summary and pooled-distribution
+levels are separate families too. Reduce the family with `reference:` (each condition vs
+one control) or `pairs:` (only the comparisons the design calls for). Fewer, planned
+comparisons lose less power to correction than all pairs.
+
+Correction interacts with the **permutation floor**: Holm multiplies the smallest p by the
+family size, so with few tomograms a real difference can be unable to reach p < 0.05
+after correction even at the floor (e.g. a 3-vs-3 floor of 0.1). `at_floor` is reported
+on the raw p; when it is set, the fix is more tomograms, not a different correction.
 
 ## Connected components (organelles) as units
 

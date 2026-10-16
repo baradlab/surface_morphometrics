@@ -11,6 +11,15 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
 (not the triangle) as the unit of replication.
 
 ### Added
+- Multiple-comparison correction. `violin --correction`, `compare --correction` and
+  `compare_batch` (`--correction` / `comparison.correction`, plus
+  `--correction-family` / `comparison.correction_family: analysis | batch`) adjust
+  p-values with `holm` (default), `fdr_bh`, `bonferroni`, or `none`. Raw p-values are
+  kept; adjusted ones are written alongside (`*_p_adj`, `p_value_adj`,
+  `p_permutation_adj`, with `correction` and `n_comparisons`), and stars are computed
+  from the adjusted p. Backed by `morphometrics_stats.adjust_pvalues` /
+  `apply_correction` (checked against statsmodels) and a `correction=` argument to
+  `pairwise_tests`. The legacy `statistics()` output is unchanged.
 - Multi-dataset comparisons: a top-level `datasets:` block federates several separately
   processed runs (each its own `work_dir`) into one comparison, via the new
   `surface_morphometrics.multidataset.MultiDataset`. Units are namespaced
@@ -127,6 +136,10 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
   whole surface) and can return its poolable sums.
 
 ### ⚠️ Breaking changes
+- `violin --test`, `compare` and `compare_batch` now correct for multiple comparisons
+  by default (Holm), so their stars and significance calls are stricter than in earlier
+  betas for the same data. Pass `--correction none` for the previous, uncorrected
+  behavior.
 - An empty `groups:` bucket (`[]` / `null`) is now an error instead of an implicit
   "everything else" bucket (unreleased behavior from earlier on this branch): write `rest`
   for the remainder or `"*"` for every tomogram.

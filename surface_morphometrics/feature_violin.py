@@ -11,7 +11,9 @@ no `IMM_dist` column), so `--feature IMM_dist` naturally compares the classes th
 measure distance to the IMM.
 
 With --test, every pair of classes is compared with a Mann-Whitney U test and a Welch
-t-test, and the plot is annotated with significance stars from the chosen one.
+t-test, and the plot is annotated with significance stars from the chosen one. p-values
+are adjusted for the number of pairs (--correction, Holm by default); the stars use the
+adjusted p.
 
 Usage:
   morphometrics violin config.yml --feature IMM_dist
@@ -31,7 +33,7 @@ import numpy as np
 import pandas as pd
 
 from .config_utils import load_config
-from .morphometrics_stats import (pairwise_tests, violin, weighted_avg_and_std,
+from .morphometrics_stats import (CORRECTIONS, pairwise_tests, violin, weighted_avg_and_std,
                                   weighted_median, weighted_histogram_peak)
 
 STATISTICS = ("mean", "median", "peak", "std")
@@ -132,6 +134,12 @@ def collect_feature(config, feature, split_components=False,
               help="Run pairwise significance tests between classes and draw stars on "
                    "the plot from the chosen test: 'mwu' (Mann-Whitney U) or 'ttest' "
                    "(Welch). Both tests are always written to a *_tests.csv.")
+@click.option("--correction", type=click.Choice(CORRECTIONS), default="holm",
+              show_default=True,
+              help="Multiple-comparison correction across the class pairs of the plot "
+                   "(each test separately): holm (family-wise error), fdr_bh (false "
+                   "discovery rate), bonferroni, or none. Stars use the adjusted p; raw "
+                   "and adjusted p are both written to the *_tests.csv.")
 @click.option("--filter", "filters", multiple=True,
               help="Keep only triangles matching [CLASS:]PROPERTY OP VALUE before "
                    "summarizing (repeatable, ANDed; OP in >= <= == != > <). E.g. "
@@ -165,7 +173,7 @@ def collect_feature(config, feature, split_components=False,
                    "A matching .png and .csv of the per-unit values are written too.")
 @click.option("--figuresize", nargs=2, type=float, default=(5.0, 4.0), show_default=True,
               help="Figure size in inches (x y).")
-def violin_cli(configfile, feature, statistic, bins, bin_range, test, filters,
+def violin_cli(configfile, feature, statistic, bins, bin_range, test, correction, filters,
                include_tomograms, exclude_tomograms, min_triangles, min_area,
                split_components, component_column, output, figuresize):
     """Violin plot of one FEATURE across membrane classes, one point per tomogram.
@@ -179,8 +187,9 @@ def violin_cli(configfile, feature, statistic, bins, bin_range, test, filters,
 
     With --test, every pair of classes is compared (Mann-Whitney U, Welch t-test, and
     a Kolmogorov-Smirnov test) and the plot is annotated with significance stars from
-    the chosen test: **** p<0.001, *** p<0.005, ** p<0.01, * p<0.05, otherwise "ns".
-    All three are written to <feature>_<statistic>_violin_tests.csv. The KS here
+    the chosen test: **** p<0.001, *** p<0.005, ** p<0.01, * p<0.05, otherwise "ns",
+    applied to the p-value adjusted across all class pairs (--correction; Holm by
+    default, `none` for raw). All three tests, raw and adjusted, are written to <feature>_<statistic>_violin_tests.csv. The KS here
     compares the per-tomogram summary values (comparison_level column), NOT the pooled
     triangle distributions with the effective-n correction in ks_statistics().
 
@@ -313,23 +322,28 @@ def violin_cli(configfile, feature, statistic, bins, bin_range, test, filters,
             # include_ks=True (default) -> the CSV also carries the paired
             # summary-statistic KS. comparison_level records that these tests operate
             # on one summary value per tomogram, not on pooled triangle distributions.
-            test_rows = pairwise_tests(datasets, used)
+            test_rows = pairwise_tests(datasets, used, correction=correction)
             for row in test_rows:
                 row["comparison_level"] = "per_tomogram_summary_statistic"
             tests_csv = out_svg[:-4] + "_tests.csv"
             cols = (["comparison_level", "class_a", "class_b", "n_a", "n_b",
                      "mean_a", "mean_b", "ci95_a", "ci95_b",
-                     "mwu_U", "mwu_p", "mwu_stars", "ttest_t", "ttest_p", "ttest_stars",
-                     "ks_stat", "ks_p", "ks_stars"])
+                     "mwu_U", "mwu_p", "mwu_p_adj", "mwu_stars",
+                     "ttest_t", "ttest_p", "ttest_p_adj", "ttest_stars",
+                     "ks_stat", "ks_p", "ks_p_adj", "ks_stars",
+                     "correction", "n_comparisons"])
             pd.DataFrame(test_rows)[cols].to_csv(tests_csv, index=False)
             star_key = "mwu_stars" if test == "mwu" else "ttest_stars"
             test_label = "Mann-Whitney U" if test == "mwu" else "Welch t-test"
-            print(f"  Pairwise {test_label} (stars on plot; MWU, Welch & KS in the CSV):")
+            print(f"  Pairwise {test_label} (stars on plot; MWU, Welch & KS in the CSV); "
+                  f"p adjusted by {correction} over {len(test_rows)} pair(s):")
             for row in test_rows:
                 print(f"    {row['class_a']} vs {row['class_b']}: "
-                      f"MWU p={row['mwu_p']:.3g} ({row['mwu_stars']}), "
-                      f"Welch p={row['ttest_p']:.3g} ({row['ttest_stars']}), "
-                      f"KS p={row['ks_p']:.3g} ({row['ks_stars']})")
+                      f"MWU p={row['mwu_p']:.3g} adj {row['mwu_p_adj']:.3g} "
+                      f"({row['mwu_stars']}), "
+                      f"Welch p={row['ttest_p']:.3g} adj {row['ttest_p_adj']:.3g} "
+                      f"({row['ttest_stars']}), "
+                      f"KS p={row['ks_p']:.3g} adj {row['ks_p_adj']:.3g} ({row['ks_stars']})")
             annotations = [(used.index(row["class_a"]), used.index(row["class_b"]),
                             row[star_key]) for row in test_rows]
 

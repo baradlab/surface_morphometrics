@@ -63,6 +63,7 @@ comparison:
     - [Veh elongated, Tg elongated]
     - [Veh fragmented, Tg fragmented]
   separator_after: 2
+  correction: holm             # adjust p over the two pairs within each analysis
   reps: 5000
   output: output_final
 

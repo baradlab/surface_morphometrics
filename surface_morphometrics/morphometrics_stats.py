@@ -252,7 +252,78 @@ def significance_stars(p, ns="ns", na="n/a"):
     return ns
 
 
-def pairwise_tests(datasets, labels, include_ks=True, ns="ns", na="n/a"):
+CORRECTIONS = ("holm", "fdr_bh", "bonferroni", "none")
+
+
+def adjust_pvalues(pvalues, method="holm"):
+    """Multiple-comparison adjusted p-values for one family of tests.
+
+    `method`:
+      * ``holm`` -- Holm step-down; controls the family-wise error rate (the chance of
+        any false positive) under any dependence between the tests. Uniformly more
+        powerful than Bonferroni. The default.
+      * ``fdr_bh`` -- Benjamini-Hochberg; controls the false discovery rate (the
+        expected fraction of false positives among the significant results). Less
+        strict; suited to screening many analyses. Valid for independent or positively
+        dependent tests.
+      * ``bonferroni`` -- p x m, capped at 1.
+      * ``none`` -- unchanged.
+
+    Non-finite p-values (degenerate tests) are passed through as NaN and do not count
+    toward the family size m. Returns a float array in the input order.
+    """
+    if method not in CORRECTIONS:
+        raise ValueError(f"correction must be one of {CORRECTIONS}, got {method!r}")
+    p = np.asarray(pvalues, dtype=float)
+    out = np.full(p.shape, np.nan)
+    ok = np.isfinite(p)
+    vals = p[ok]
+    m = vals.size
+    if m == 0:
+        return out
+    if method == "none":
+        adj = vals.copy()
+    elif method == "bonferroni":
+        adj = np.minimum(vals * m, 1.0)
+    else:
+        order = np.argsort(vals, kind="mergesort")
+        ranked = vals[order]
+        if method == "holm":
+            stepped = np.maximum.accumulate((m - np.arange(m)) * ranked)
+        else:   # fdr_bh
+            stepped = np.minimum.accumulate((ranked * m / np.arange(1, m + 1))[::-1])[::-1]
+        adj = np.empty(m)
+        adj[order] = np.minimum(stepped, 1.0)
+    out[ok] = adj
+    return out
+
+
+def apply_correction(rows, method="holm", pcols=("mwu_p", "ttest_p", "ks_p"),
+                     ns="ns", na="n/a"):
+    """Adjust the p-value columns of a list of test rows (one family) in place.
+
+    For each `pcol` present, adds ``<pcol>_adj``; where the row has a matching
+    ``<test>_stars`` column (``mwu_p`` -> ``mwu_stars``), the stars are recomputed from
+    the ADJUSTED p. Each column is adjusted separately (MWU, Welch and KS are
+    alternative tests of the same comparisons, not more comparisons). Adds
+    ``correction`` and ``n_comparisons`` (the family size). Returns `rows`.
+    """
+    for pcol in pcols:
+        if not any(pcol in r for r in rows):
+            continue
+        adj = adjust_pvalues([r.get(pcol, np.nan) for r in rows], method)
+        star_col = pcol[:-2] + "_stars" if pcol.endswith("_p") else None
+        for r, a in zip(rows, adj):
+            r[pcol + "_adj"] = float(a)
+            if star_col and star_col in r:
+                r[star_col] = significance_stars(a, ns, na)
+    for r in rows:
+        r["correction"] = method
+        r["n_comparisons"] = len(rows)
+    return rows
+
+
+def pairwise_tests(datasets, labels, include_ks=True, ns="ns", na="n/a", correction=None):
     """Pairwise significance tests between every pair of datasets.
 
     Operates on whatever you pass as `datasets` — in this codebase that is one
@@ -268,6 +339,13 @@ def pairwise_tests(datasets, labels, include_ks=True, ns="ns", na="n/a"):
 
     Degenerate comparisons (identical or near-identical groups) return NaN -> `na`
     rather than raising, and scipy's precision-loss warning is suppressed.
+
+    `correction` (one of :data:`CORRECTIONS`) adjusts each test's p-values across all
+    the pairs returned (the family) via :func:`apply_correction`: adds ``*_p_adj``
+    columns, recomputes the stars from them, and records ``correction`` /
+    ``n_comparisons``. The default None leaves the rows exactly as before (the legacy
+    ``statistics()`` output). To correct over a subset of pairs, call without
+    `correction`, filter, then :func:`apply_correction`.
 
     Returns a list of dicts, one per pair (i<j), ordered by dataset index.
     """
@@ -307,6 +385,8 @@ def pairwise_tests(datasets, labels, include_ks=True, ns="ns", na="n/a"):
                     row.update(ks_stat=ks, ks_p=p_ks,
                                ks_stars=significance_stars(p_ks, ns, na))
             rows.append(row)
+    if correction is not None:
+        apply_correction(rows, correction, ns=ns, na=na)
     return rows
 
 
