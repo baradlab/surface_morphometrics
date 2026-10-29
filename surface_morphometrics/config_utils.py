@@ -21,6 +21,8 @@ DIR_KEYS = ("seg_dir", "tomo_dir", "work_dir")
 # for the user / each command: top-level segmentation_values and exp_name, and within
 # sections the membership/selection lists (distance intra/inter, thickness components,
 # patch_analysis membrane_label).
+DEFAULT_SMOOTHING_BATCH_SIZE = 128
+
 DEFAULTS = {
     "cores": 6,
     "surface_generation": {
@@ -87,6 +89,7 @@ DEFAULTS = {
         "max_total_offset": 8,
         "smooth_offsets": True,
         "offset_smoothing_radius": 25,
+        "smoothing_batch_size": DEFAULT_SMOOTHING_BATCH_SIZE,
         "laplacian_iterations": 5,
         "laplacian_lambda": 0.5,
         "lowpass_sigma": 0,

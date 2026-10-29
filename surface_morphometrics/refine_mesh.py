@@ -36,7 +36,7 @@ from pathlib import Path
 import yaml
 import click
 
-from .config_utils import load_config
+from .config_utils import load_config, DEFAULT_SMOOTHING_BATCH_SIZE
 import vtk
 import multiprocessing as mp
 
@@ -407,7 +407,13 @@ def compute_triangle_offsets(graph, sampling_data, x_positions, average_radius, 
     return offsets, sigmas1, sigmas2
 
 
-def smooth_offset_field(offsets, xyz, smoothing_radius=10.0, iterations=1):
+def _validate_smoothing_batch_size(batch_size):
+    if isinstance(batch_size, (bool, np.bool_)) or not isinstance(batch_size, (int, np.integer)) or batch_size < 1:
+        raise ValueError("smoothing_batch_size must be a positive integer")
+
+
+def smooth_offset_field(offsets, xyz, smoothing_radius=10.0, iterations=1,
+                        batch_size=DEFAULT_SMOOTHING_BATCH_SIZE):
     """
     Spatially smooth the offset field to reduce roughness.
 
@@ -421,6 +427,9 @@ def smooth_offset_field(offsets, xyz, smoothing_radius=10.0, iterations=1):
         Radius for neighbor averaging (nm)
     iterations : int
         Number of smoothing iterations
+    batch_size : int
+        Maximum query triangles per batch. Must be a positive integer. This
+        bounds temporary neighbor lists without changing the smoothing radius.
 
     Returns
     -------
@@ -429,23 +438,30 @@ def smooth_offset_field(offsets, xyz, smoothing_radius=10.0, iterations=1):
     """
     from scipy import spatial
 
+    _validate_smoothing_batch_size(batch_size)
+    batch_size = int(batch_size)
     tree = spatial.cKDTree(xyz)
     smoothed = offsets.copy()
 
     for _ in range(iterations):
         new_smoothed = np.zeros_like(smoothed)
-        # Query all neighbors within radius
-        neighbors_list = tree.query_ball_tree(tree, smoothing_radius)
-
-        for i, neighbors in enumerate(neighbors_list):
-            if len(neighbors) > 0:
-                # Weighted average: closer neighbors have more influence
-                neighbor_xyz = xyz[neighbors]
-                distances = np.linalg.norm(neighbor_xyz - xyz[i], axis=1)
-                weights = 1.0 / (1.0 + distances)
-                new_smoothed[i] = np.average(smoothed[neighbors], weights=weights)
-            else:
-                new_smoothed[i] = smoothed[i]
+        for start in range(0, len(xyz), batch_size):
+            # Exact, sorted neighbors retain the original query_ball_tree
+            # inclusion and summation order. Read only the previous iteration.
+            neighbors_list = tree.query_ball_point(
+                xyz[start:start + batch_size], smoothing_radius,
+                eps=0, return_sorted=True, workers=1,
+            )
+            for i, neighbors in enumerate(neighbors_list, start=start):
+                if len(neighbors) > 0:
+                    neighbor_xyz = xyz[neighbors]
+                    distances = np.linalg.norm(neighbor_xyz - xyz[i], axis=1)
+                    weights = 1.0 / (1.0 + distances)
+                    new_smoothed[i] = np.average(smoothed[neighbors], weights=weights)
+                else:
+                    new_smoothed[i] = smoothed[i]
+            # Release this batch before allocating the next one.
+            del neighbors_list
 
         smoothed = new_smoothed
 
@@ -885,7 +901,8 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
                           smooth_offsets=True, offset_smoothing_radius=None,
                           laplacian_iterations=0, laplacian_lambda=0.5, lowpass_sigma=0,
                           run_full_pycurv=True, warn_intermediate=True,
-                          compute_thickness=False, interpolation="cubic"):
+                          compute_thickness=False, interpolation="cubic",
+                          smoothing_batch_size=DEFAULT_SMOOTHING_BATCH_SIZE):
     """
     Perform a single iteration of mesh refinement.
 
@@ -927,6 +944,8 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
         If True, spatially smooth offset field before applying
     offset_smoothing_radius : float or None
         Radius for offset smoothing. If None, uses average_radius.
+    smoothing_batch_size : int
+        Maximum query triangles per smoothing batch.
     laplacian_iterations : int
         Number of Laplacian smoothing iterations after displacement (0 = disabled)
     laplacian_lambda : float
@@ -1049,7 +1068,8 @@ def refine_mesh_iteration(graph_file, vtp_file, mrc_file, output_base, pixel_siz
     if smooth_offsets:
         smoothing_r = offset_smoothing_radius if offset_smoothing_radius else average_radius
         print(f"Smoothing offset field (radius={smoothing_r:.1f} nm)...")
-        offsets = smooth_offset_field(offsets, xyz, smoothing_radius=smoothing_r, iterations=1)
+        offsets = smooth_offset_field(offsets, xyz, smoothing_radius=smoothing_r,
+                                      iterations=1, batch_size=smoothing_batch_size)
 
     # Build triangle to vertex mapping
     triangle_vertices = build_triangle_to_vertex_mapping(surf)
@@ -1228,7 +1248,7 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
                 component=None, tomogram=None, mrc_file_override=None, monolayer=None,
                 max_total_offset=None, use_xcorr=None, xcorr_iterations=None,
                 smooth_offsets=None, laplacian_iterations=None, laplacian_lambda=None,
-                lowpass_sigma=None):
+                lowpass_sigma=None, smoothing_batch_size=None):
     """
     Iteratively refine mesh positions using density-guided vertex movement.
 
@@ -1269,6 +1289,8 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
         Laplacian smoothing strength (0-1). If None, reads from config.
     lowpass_sigma : float or None
         Sigma in nm for 3D Gaussian low-pass filter on tomogram before sampling (0=disabled). If None, reads from config.
+    smoothing_batch_size : int or None
+        Maximum query triangles per smoothing batch. If None, reads from config.
 
     Returns
     -------
@@ -1291,6 +1313,9 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
     density_config = config.get("density_sampling", config.get("thickness_measurements", {}))
     thickness_config = config.get("thickness_measurements", {})
     refinement_config = config.get("mesh_refinement", {})
+    if smoothing_batch_size is None:
+        smoothing_batch_size = refinement_config.get("smoothing_batch_size", DEFAULT_SMOOTHING_BATCH_SIZE)
+    _validate_smoothing_batch_size(smoothing_batch_size)
 
     pixel_size = config.get("surface_generation", {}).get("pixel_size", 1.0)
     # Try to get pixel size from a known location or default
@@ -1374,7 +1399,7 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
     # Smoothing settings
     if smooth_offsets:
         smooth_r = offset_smoothing_radius if offset_smoothing_radius else "same as average_radius"
-        print(f"  Offset smoothing: enabled (radius={smooth_r})")
+        print(f"  Offset smoothing: enabled (radius={smooth_r}, batch_size={smoothing_batch_size})")
     else:
         print(f"  Offset smoothing: disabled")
     if laplacian_iterations > 0:
@@ -1619,6 +1644,7 @@ def refine_mesh(config_file, iterations=5, damping_factor=0.6, output_dir=None,
                         use_xcorr=iter_use_xcorr,
                         smooth_offsets=smooth_offsets,
                         offset_smoothing_radius=offset_smoothing_radius,
+                        smoothing_batch_size=smoothing_batch_size,
                         laplacian_iterations=laplacian_iterations,
                         laplacian_lambda=laplacian_lambda,
                         lowpass_sigma=lowpass_sigma,
