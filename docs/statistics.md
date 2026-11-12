@@ -17,6 +17,7 @@ intuition (the numbers below are from those simulations; see
 | Compare two **full distributions** (e.g. treatment vs control) | `spatial_stats.permutation_test(...)` | tomogram (or organelle, nested via `strata=`) |
 | A **confidence interval** on a per-condition mean | `spatial_stats.cluster_t_interval(...)` | tomogram |
 | A **corrected pooled KS** with an effective-N | `spatial_stats.estimate_neff(...)` then a KS with that N | tomogram-equivalent patches |
+| Compare **membrane classes** (e.g. OMM vs IMM) within the same tomograms | `compare_batch` with `compare: classes`, or `spatial_stats.paired_permutation_test(...)` | tomogram (paired) |
 | Run a whole study (many features × N conditions, possibly several runs) | `morphometrics compare_batch study.yml` ([dataset.md](dataset.md#morphometrics-compare_batch-many-analyses-n-conditions-one-config)) | tomogram |
 | Ask whether a feature's local variation is **signal or noise**, and at what scale | `morphometrics variogram -n <feature>` (+ `measure_thickness --noise-estimate`) | — (QC) |
 
@@ -86,6 +87,8 @@ violin per class with the points overlaid. `--test` annotates significance stars
 ### `spatial_stats.py` — spatially-aware distribution comparison
 The statistically load-bearing module.
 - `permutation_test(...)` — the recommended full-distribution comparison.
+- `paired_permutation_test(...)` — two classes in the same tomograms: swaps the class
+  labels within tomograms (after a per-tomogram median shift), exact when 2ⁿ ≤ reps.
 - `intraclass_correlation(...)` — diagnostic for whether organelles can be treated as
   independent.
 - `weighted_ks_statistic`, `weighted_wasserstein` — area-weighted effect sizes.

@@ -316,6 +316,54 @@ Notes on the analysis fields:
 - `min_triangles` / `min_area` drop tiny units, as for `violin`.
 - `statistics.filters` (top level) applies to every analysis, e.g. a data-quality cut.
 
+### Comparing membrane classes within a condition (`compare: classes`)
+
+An analysis can compare **organelles against each other** instead of conditions — e.g.
+"is the IMM more curved than the OMM in vehicle cells?". Each tomogram contributes every
+class, so this is a **paired** design, and the analysis uses paired tests:
+
+```yaml
+analyses:
+  - name: membrane_curvedness
+    compare: classes             # default `conditions`
+    classes: [OMM, IMM, ER]      # at least two
+    condition: Vehicle           # optional: one bucket of comparison.group (omit = all tomograms)
+    feature: curvedness_VV
+    statistic: peak
+    range: [0, 0.1]
+    reference: OMM               # optional: test each class vs this one only
+    # pairs: [[OMM, IMM]]        # optional: exactly these class pairs
+    # center: median             # optional: median (default) | mean | null
+```
+
+| Level | Test | Unit |
+|---|---|---|
+| per-tomogram summary | Wilcoxon signed-rank and paired t on each tomogram's class summaries | tomograms with both classes |
+| pooled distribution | area-weighted KS, p-value from swapping the class labels **within** tomograms | same |
+
+Why paired: tomograms differ from one another (cell state, thickness, defocus), and both
+classes share that variation. A paired test holds it fixed, so a class difference that
+is small next to the spread between tomograms is still detectable; treating the classes
+as independent groups would count that spread as noise.
+
+Details:
+
+- Only tomograms that have **both** classes of a pair enter its test (`n_pairs`). A
+  class lacking the feature (e.g. `IMM_dist` on the IMM) is dropped with a note.
+- The pooled test first shifts both classes of each tomogram by their combined median
+  (`center`), so the effect size describes the within-tomogram difference (column `ks`;
+  the plain pooled KS is kept as `ks_uncentered`). Without the shift, large differences
+  between tomograms make the pooled KS ignore the pairing.
+- With n tomograms the smallest attainable p is 2 / 2ⁿ (0.125 for 4, 0.0039 for 9);
+  when 2ⁿ ≤ `reps` every label swap is enumerated and the p-value is exact (`exact`).
+- Each pooled row reports per-class CIs and a CI on the per-tomogram difference
+  (`diff`, `diff_ci_low`, `diff_ci_high`, using `ci_statistic`).
+- Organelles of different classes are not paired, so `--split-components` does not
+  apply. `--conditions` skips class analyses whose `condition` is not listed.
+- Results go into the same `summary.csv` (one row per class) and `tests.csv` (levels
+  `per_tomogram_paired_summary` and `pooled_distribution_paired_permutation`), and are
+  corrected for multiple comparisons over the class pairs.
+
 For a factorial design (e.g. treatment × morphology), make one group whose buckets are the
 cells of the design and list the comparisons you want in `pairs:`. The worked example in
 [`examples/mitochondria/`](../examples/mitochondria/) ports the paper's 974-line

@@ -16,6 +16,8 @@ Two defensible routes are provided.
                              default; pass `strata` (tomogram id per unit) to make the unit
                              a connected component/organelle while keeping the p-value's
                              replication level at the tomogram (nested).
+  * paired_permutation_test(...) -- two classes measured in the same tomograms (e.g.
+                             OMM vs IMM): swaps the class labels within tomograms.
   * intraclass_correlation(...)  -- between-tomogram vs within-tomogram variance of a
                              per-organelle summary; tells you whether organelles can be
                              treated as independent samples (low ICC) or cluster by
@@ -595,6 +597,96 @@ def permutation_test(unit_values, unit_conditions, statistic="ks",
         "min_possible_p": (2.0 if n_blocks_a == len(blocks_b) else 1.0)
                           / comb(len(all_blocks), n_blocks_a),
     }
+
+
+def paired_permutation_test(values_a, values_b, weights_a=None, weights_b=None,
+                            statistic="ks", reps=5000, seed=0, grid_points=4096,
+                            center="median"):
+    """Compare two classes measured in the SAME tomograms (a paired design).
+
+    `values_a[i]` and `values_b[i]` are the per-triangle values of class A and class B in
+    tomogram i (e.g. the OMM and the IMM of one cell), with optional area weights. The
+    effect size pools each class over all tomograms and compares the two weighted
+    distributions (area-weighted KS D or Wasserstein). The null hypothesis is that, within
+    a tomogram, the two class labels are exchangeable: each replicate swaps A and B in a
+    random subset of tomograms. The tomogram remains the unit of replication, and
+    tomogram-to-tomogram variation (which both classes share) is held fixed rather than
+    counted as noise -- the reason a paired design has more power than comparing the
+    classes as independent groups.
+
+    `center` (default ``"median"``) first shifts both classes of each tomogram by that
+    tomogram's combined area-weighted median (``"mean"``: mean; None: no shift). This is
+    the paired analog of removing each subject's mean. Without it, when tomograms differ
+    from one another more than the classes differ within a tomogram, each tomogram's
+    A-vs-B difference sits at a different place on the value axis; the pooled KS then
+    reports the single largest one whatever the others do, label swaps barely change it,
+    and the pairing buys no power. The shift is symmetric in A and B, so the swaps stay
+    valid. The effect size then describes the WITHIN-tomogram difference; the uncentered
+    pooled statistic is also returned (`observed_uncentered`) for description.
+
+    With n tomograms there are 2^n swap patterns. When 2^n <= `reps` every pattern is
+    enumerated and the p-value is exact; otherwise `reps` random patterns are drawn.
+    The smallest attainable p is 2 / 2^n (swapping every tomogram reproduces the
+    observed split), so few tomograms cannot give a small p however large the effect.
+
+    Returns a dict: statistic, observed, observed_uncentered, p_value, n_pairs, reps,
+    exact, min_possible_p, center.
+    """
+    if statistic not in _STATISTICS:
+        raise ValueError(f"statistic must be one of {tuple(_STATISTICS)}")
+    if center not in (None, "median", "mean"):
+        raise ValueError("center must be 'median', 'mean' or None")
+    va = [np.asarray(v, dtype=float) for v in values_a]
+    vb = [np.asarray(v, dtype=float) for v in values_b]
+    if len(va) != len(vb):
+        raise ValueError("values_a and values_b must list the same tomograms")
+    n = len(va)
+    if n < 1:
+        raise ValueError("need at least one paired tomogram")
+    wa = [np.ones(len(v)) for v in va] if weights_a is None else \
+        [np.asarray(w, dtype=float) for w in weights_a]
+    wb = [np.ones(len(v)) for v in vb] if weights_b is None else \
+        [np.asarray(w, dtype=float) for w in weights_b]
+    uncentered = _STATISTICS[statistic](np.concatenate(va), np.concatenate(vb),
+                                        np.concatenate(wa), np.concatenate(wb))
+    if center is not None:
+        summarize = _weighted_median if center == "median" else _weighted_mean
+        shifts = [summarize(np.concatenate([a, b]), np.concatenate([x, y]))
+                  for a, b, x, y in zip(va, vb, wa, wb)]
+        va = [v - c for v, c in zip(va, shifts)]
+        vb = [v - c for v, c in zip(vb, shifts)]
+
+    grid = _shared_grid(va + vb, grid_points)
+    ta = np.array([w.sum() for w in wa])
+    tb = np.array([w.sum() for w in wb])
+    # Weight-scaled ECDFs per tomogram, so a pooled ECDF is a sum over tomograms / total.
+    sa = np.array([t * _ecdf_on_grid(v, w, grid) for v, w, t in zip(va, wa, ta)])
+    sb = np.array([t * _ecdf_on_grid(v, w, grid) for v, w, t in zip(vb, wb, tb)])
+
+    def stat_for(swap):
+        num_a = sa[~swap].sum(axis=0) + sb[swap].sum(axis=0)
+        num_b = sb[~swap].sum(axis=0) + sa[swap].sum(axis=0)
+        den_a = ta[~swap].sum() + tb[swap].sum()
+        den_b = tb[~swap].sum() + ta[swap].sum()
+        diff = np.abs(num_a / den_a - num_b / den_b)
+        if statistic == "ks":
+            return float(diff.max())
+        return float(np.trapezoid(diff, grid))
+
+    observed = stat_for(np.zeros(n, dtype=bool))
+    exact = 2 ** n <= reps
+    if exact:
+        patterns = ((np.arange(2 ** n)[:, None] >> np.arange(n)) & 1).astype(bool)
+        ge = sum(stat_for(m) >= observed - 1e-12 for m in patterns)
+        p_value, used = ge / len(patterns), len(patterns)
+    else:
+        rng = np.random.default_rng(seed)
+        ge = sum(stat_for(rng.random(n) < 0.5) >= observed - 1e-12 for _ in range(reps))
+        p_value, used = (1 + ge) / (1 + reps), reps
+    return {"statistic": statistic, "observed": observed,
+            "observed_uncentered": float(uncentered), "p_value": float(p_value),
+            "n_pairs": n, "reps": used, "exact": bool(exact),
+            "min_possible_p": min(1.0, 2.0 / 2 ** n), "center": center}
 
 
 # ---------------------------------------------------------------------------

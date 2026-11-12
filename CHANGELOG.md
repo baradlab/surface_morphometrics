@@ -11,6 +11,16 @@ significance tester, and spatially-aware comparison tools that treat the tomogra
 (not the triangle) as the unit of replication.
 
 ### Added
+- `compare_batch` analyses with `compare: classes` compare membrane classes against each
+  other within one condition (e.g. OMM vs IMM vs ER in vehicle cells). Because every
+  tomogram contributes each class, the tests are paired: Wilcoxon signed-rank and paired
+  t on the per-tomogram summaries (`morphometrics_stats.paired_tests`), and a permutation
+  test that swaps the class labels within tomograms
+  (`spatial_stats.paired_permutation_test`; exact when 2ⁿ ≤ reps, floor 2 / 2ⁿ). The
+  pooled test shifts each tomogram's classes by their combined median first, so large
+  differences between tomograms do not hide the pairing. Supports `classes`,
+  `condition`, `reference`, `pairs`, `center`, CIs on the per-tomogram difference, and
+  multiple-comparison correction over the class pairs.
 - Multiple-comparison correction. `violin --correction`, `compare --correction` and
   `compare_batch` (`--correction` / `comparison.correction`, plus
   `--correction-family` / `comparison.correction_family: analysis | batch`) adjust

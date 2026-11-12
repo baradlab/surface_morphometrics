@@ -42,7 +42,25 @@ Works on a single run (`seg_dir`/`work_dir` + `groups:`) or on several runs fede
         title: OMM-IMM distance     # optional plot title / axis label
         xlabel: Distance (nm)
 
-Writes `summary.csv` (one row per analysis x condition) and `tests.csv` (one row per
+Analyses can instead compare MEMBRANE CLASSES within one condition (e.g. OMM vs IMM vs
+ER in the vehicle cells). Every tomogram carries all the classes, so this is a paired
+design and uses paired tests: a Wilcoxon signed-rank / paired t-test on the per-tomogram
+summaries, and a permutation test that swaps the class labels within each tomogram
+(`spatial_stats.paired_permutation_test`)::
+
+      - name: omm_vs_imm_curvedness
+        compare: classes            # default `conditions`
+        classes: [OMM, IMM, ER]     # at least two; classes lacking the feature are dropped
+        condition: Vehicle          # optional: one bucket of comparison.group (omit = all)
+        feature: curvedness_VV
+        statistic: peak
+        range: [0, 0.1]
+        reference: OMM              # optional: test each class vs this one only
+        pairs: [[OMM, IMM]]         # optional: exactly these class pairs
+        center: median              # optional: per-tomogram shift before pooling
+                                    # (median | mean | null; see paired_permutation_test)
+
+Writes `summary.csv` (one row per analysis x condition, or x class) and `tests.csv` (one row per
 test, with a `level` column) into the output directory, plus per-analysis violin and
 histogram SVG/PNGs.
 """
@@ -103,9 +121,28 @@ def validate_analyses(analyses):
         raise ValueError("config has no `analyses:` list")
     seen = set()
     for i, a in enumerate(analyses):
-        missing = [k for k in ("name", "class", "feature") if not a.get(k)]
+        kind = a.get("compare", "conditions")
+        if kind not in ("conditions", "classes"):
+            raise ValueError(f"analyses[{i}]: compare must be 'conditions' or 'classes'")
+        if kind == "classes" and a.get("center", "median") not in (None, "median", "mean"):
+            raise ValueError(f"analyses[{i}]: center must be median, mean or null")
+        required = ("name", "class", "feature") if kind == "conditions" else \
+            ("name", "classes", "feature")
+        missing = [k for k in required if not a.get(k)]
         if missing:
             raise ValueError(f"analyses[{i}] is missing {', '.join(missing)}")
+        if kind == "classes":
+            classes = a["classes"]
+            if not isinstance(classes, (list, tuple)) or len(set(classes)) < 2:
+                raise ValueError(f"analysis {a['name']!r}: `classes` must list at least "
+                                 "two different membrane classes")
+            for pair in a.get("pairs") or []:
+                if len(pair) != 2 or any(c not in classes for c in pair):
+                    raise ValueError(f"analysis {a['name']!r}: pairs entry {pair} must "
+                                     f"name two of its classes {list(classes)}")
+            if a.get("reference") is not None and a["reference"] not in classes:
+                raise ValueError(f"analysis {a['name']!r}: reference {a['reference']!r} "
+                                 f"is not one of its classes {list(classes)}")
         if a["name"] in seen:
             raise ValueError(f"duplicate analysis name {a['name']!r}")
         seen.add(a["name"])
@@ -133,6 +170,174 @@ def collect(ds, feature, label, group, filters=None, split_components=False,
         units.append(unit)
         strata.append(stratum)
     return values, areas, conds, units, strata
+
+
+_PCOLS = ("mwu_p", "ttest_p", "ks_p", "wilcoxon_p", "ttest_rel_p", "p_permutation")
+
+
+def _run_class_analysis(ds, analysis, group, output_dir, base_filters=None,
+                        split_components=False, reps=5000, seed=0, plots=True,
+                        correction="holm", log=print):
+    """One `compare: classes` analysis: paired comparison of membrane classes.
+
+    Returns (summary_rows, test_rows). `correction=None` leaves the p-values unadjusted
+    (the caller corrects across the batch instead).
+    """
+    from matplotlib.colors import to_rgba
+
+    from . import surface_filters as sf
+    from .feature_violin import summary_statistic
+    from .morphometrics_stats import apply_correction, histogram, paired_tests, violin
+    from .spatial_stats import cluster_t_interval, paired_permutation_test
+
+    name, feature = analysis["name"], analysis["feature"]
+    classes = list(dict.fromkeys(analysis["classes"]))
+    condition = analysis.get("condition")
+    clauses = sf.parse_filters(list(base_filters or []) + list(analysis.get("filters") or []))
+    stat = analysis.get("statistic", "peak")
+    rng = analysis.get("range")
+    title = analysis.get("title", name)
+    ci_stat = analysis.get("ci_statistic", "mean")
+    where = f"condition {condition}" if condition else "all tomograms"
+    log(f"\n=== {title} [{' vs '.join(classes)}: {feature}, {where}"
+        f"{', ' + sf.describe(clauses) if clauses else ''}; paired by tomogram] ===")
+    if split_components:
+        log("  NOTE: classes are paired by tomogram, so --split-components is ignored here.")
+
+    # Pool each class per tomogram (organelles of different classes are not paired).
+    records, _diag = ds.collect_feature(feature, filters=clauses,
+                                        min_triangles=analysis.get("min_triangles", 0),
+                                        min_area=analysis.get("min_area", 0.0))
+    data = {c: {} for c in classes}          # class -> {tomogram: (values, areas)}
+    for label, _unit, stratum, vals, ars in records:
+        if label not in data:
+            continue
+        if condition is not None and ds.metadata(stratum).get(group) != condition:
+            continue
+        data[label][stratum] = (vals, ars)
+    missing = [c for c in classes if not data[c]]
+    if missing:
+        log(f"  no surfaces with '{feature}' for {', '.join(missing)} -- dropped.")
+    present = [c for c in classes if data[c]]
+    if len(present) < 2:
+        log("  fewer than two classes have this feature -- skipping.")
+        return [], []
+    log("  tomograms: " + ", ".join(f"{c}={len(data[c])}" for c in present))
+
+    summaries = {c: {t: summary_statistic(v, a, stat, bins=100, bin_range=rng)
+                     for t, (v, a) in data[c].items()} for c in present}
+    palette = analysis.get("colors") or {}
+    colors = [list(to_rgba(palette.get(c, _PALETTE[i % len(_PALETTE)]), alpha=0.9))
+              for i, c in enumerate(present)]
+    if plots:
+        violin([list(summaries[c].values()) for c in present], present, title=title,
+               ylabel=analysis.get("xlabel", feature),
+               filename=os.path.join(output_dir, f"{name}_violin.svg"),
+               custom_colors=colors)
+
+    summary_rows = []
+    for c in present:
+        vals = np.asarray(list(summaries[c].values()), dtype=float)
+        summary_rows.append({"analysis": name, "class": c, "feature": feature,
+                             "filter": sf.describe(clauses), "statistic": stat,
+                             "condition": condition or "all", "n_tomograms": len(vals),
+                             "mean": vals.mean(),
+                             "sd": vals.std(ddof=1) if len(vals) > 1 else np.nan})
+
+    if analysis.get("pairs"):
+        pairs = [tuple(p) for p in analysis["pairs"] if p[0] in present and p[1] in present]
+    elif analysis.get("reference") in present:
+        ref = analysis["reference"]
+        pairs = [(ref, c) for c in present if c != ref]
+    else:
+        pairs = list(combinations(present, 2))
+
+    test_rows = []
+    summary_tests = paired_tests(summaries, pairs)
+    if correction:
+        apply_correction(summary_tests, correction, pcols=("wilcoxon_p", "ttest_rel_p"))
+    for row in summary_tests:
+        row.update({"analysis": name, "level": "per_tomogram_paired_summary",
+                    "feature": feature, "condition": condition or "all"})
+        test_rows.append(row)
+        adj = (f" ({correction}-adj {row['wilcoxon_p_adj']:.3g})"
+               if "wilcoxon_p_adj" in row else "")
+        log(f"  {row['class_a']} vs {row['class_b']} (per-tomogram {stat}, "
+            f"{row['n_pairs']} pairs): diff {row['mean_diff']:.4g}, "
+            f"Wilcoxon p={row['wilcoxon_p']:.3g}{adj}")
+
+    if not analysis.get("distribution_test", stat != "std"):
+        log("  (distribution-level permutation skipped: this analysis compares a "
+            "per-tomogram summary, not the pooled distribution)")
+        return summary_rows, test_rows
+
+    if plots and rng:
+        hist_data, hist_areas = [], []
+        for c in present:
+            v = np.concatenate([x[0] for x in data[c].values()])
+            a = np.concatenate([x[1] for x in data[c].values()])
+            hist_data.append(v)
+            hist_areas.append(a / a.sum())
+        histogram(hist_data, hist_areas, present, title=title,
+                  xlabel=analysis.get("xlabel", feature),
+                  filename=os.path.join(output_dir, f"{name}_hist.svg"), bins=100,
+                  range=rng, custom_colors=colors,
+                  custom_colors_light=[c[:3] + [0.3] for c in colors])
+
+    perm_rows = []
+    for ca, cb in pairs:
+        common = sorted(set(data[ca]) & set(data[cb]))
+        if not common:
+            log(f"  {ca} vs {cb}: no tomogram has both -- skipping.")
+            continue
+        perm = paired_permutation_test(
+            [data[ca][t][0] for t in common], [data[cb][t][0] for t in common],
+            [data[ca][t][1] for t in common], [data[cb][t][1] for t in common],
+            statistic="ks", reps=reps, seed=seed, center=analysis.get("center", "median"))
+        row = {"analysis": name, "level": "pooled_distribution_paired_permutation",
+               "feature": feature, "filter": sf.describe(clauses),
+               "condition": condition or "all", "class_a": ca, "class_b": cb,
+               "ks": perm["observed"], "ks_uncentered": perm["observed_uncentered"],
+               "center": perm["center"], "p_permutation": perm["p_value"],
+               "p_floor": perm["min_possible_p"],
+               "at_floor": perm["p_value"] <= perm["min_possible_p"] + 1e-12,
+               "exact": perm["exact"], "n_pairs": perm["n_pairs"],
+               "ci_statistic": ci_stat}
+        # Per-class CIs over the paired tomograms, and a CI on the paired difference.
+        for tag, c in (("a", ca), ("b", cb)):
+            ci = (cluster_t_interval([data[c][t][0] for t in common],
+                                     [data[c][t][1] for t in common], statistic=ci_stat)
+                  if len(common) >= 2 else None)
+            row[f"mean_{tag}"] = ci["estimate"] if ci else np.nan
+            row[f"ci_{tag}_low"] = ci["ci_low"] if ci else np.nan
+            row[f"ci_{tag}_high"] = ci["ci_high"] if ci else np.nan
+        if len(common) >= 2:
+            from scipy.stats import t as t_dist
+            fa = cluster_t_interval([data[ca][t][0] for t in common],
+                                    [data[ca][t][1] for t in common], statistic=ci_stat)
+            fb = cluster_t_interval([data[cb][t][0] for t in common],
+                                    [data[cb][t][1] for t in common], statistic=ci_stat)
+            d = np.array(fa["unit_values"]) - np.array(fb["unit_values"])
+            half = t_dist.ppf(0.95, len(d) - 1) * d.std(ddof=1) / np.sqrt(len(d))
+            row.update(diff=float(d.mean()), diff_ci_low=float(d.mean() - half),
+                       diff_ci_high=float(d.mean() + half))
+        perm_rows.append(row)
+    if correction and perm_rows:
+        apply_correction(perm_rows, correction, pcols=("p_permutation",))
+    for row in perm_rows:
+        adj = (f", {correction}-adj {row['p_permutation_adj']:.4f}"
+               if "p_permutation_adj" in row else "")
+        diff = (f"; {ci_stat} diff {row['diff']:.4g} [{row['diff_ci_low']:.4g}, "
+                f"{row['diff_ci_high']:.4g}]" if "diff" in row else "")
+        log(f"  {row['class_a']} vs {row['class_b']} (pooled, paired): "
+            f"KS={row['ks']:.3f}  p={row['p_permutation']:.4f}{adj} "
+            f"(floor {row['p_floor']:.3g}{', exact' if row['exact'] else ''}){diff}"
+            + ("  <-- AT FLOOR: needs more tomograms" if row["at_floor"] else ""))
+        test_rows.append(row)
+    if plots:
+        import matplotlib.pyplot as plt
+        plt.close("all")
+    return summary_rows, test_rows
 
 
 def run_batch(ds, comparison, analyses, output_dir, only=None, conditions=None,
@@ -178,6 +383,17 @@ def run_batch(ds, comparison, analyses, output_dir, only=None, conditions=None,
     summary_rows, test_rows = [], []
     for analysis in analyses:
         if only and analysis["name"] not in only:
+            continue
+        if analysis.get("compare", "conditions") == "classes":
+            if conditions and analysis.get("condition") not in conditions:
+                continue   # --conditions restricts class analyses to those conditions
+            s_rows, t_rows = _run_class_analysis(
+                ds, analysis, group, output_dir, base_filters=base_filters,
+                split_components=split_components, reps=reps, seed=seed, plots=plots,
+                correction=correction if correction_family == "analysis" else None,
+                log=log)
+            summary_rows.extend(s_rows)
+            test_rows.extend(t_rows)
             continue
         name = analysis["name"]
         feature, label = analysis["feature"], analysis["class"]
@@ -331,13 +547,16 @@ def run_batch(ds, comparison, analyses, output_dir, only=None, conditions=None,
             plt.close("all")
 
     if correction_family == "batch":
-        summary_level = [r for r in test_rows if r["level"].endswith("_summary")]
-        perm_level = [r for r in test_rows if r["level"] == "pooled_distribution_permutation"]
-        apply_correction(summary_level, correction)
-        apply_correction(perm_level, correction, pcols=("p_permutation",))
-        log(f"\nAdjusted by {correction} across the batch: {len(summary_level)} "
-            f"summary-level and {len(perm_level)} pooled-distribution comparisons "
-            "(see the *_adj columns in tests.csv).")
+        # One family per level (condition vs paired-class tests are different questions).
+        levels = []
+        for r in test_rows:
+            if r["level"] not in levels:
+                levels.append(r["level"])
+        for level in levels:
+            rows = [r for r in test_rows if r["level"] == level]
+            apply_correction(rows, correction, pcols=_PCOLS)
+            log(f"\nAdjusted by {correction} across the batch: {len(rows)} {level} "
+                "comparisons (see the *_adj columns in tests.csv).")
 
     summary = pd.DataFrame(summary_rows)
     tests = pd.DataFrame(test_rows)
@@ -423,6 +642,12 @@ def compare_batch_cli(configfile, only, conditions, split_components, reps, seed
         if len(pair) != 2 or any(p not in names for p in pair):
             raise click.ClickException(
                 f"comparison.pairs entry {pair} must name two of the conditions {sorted(names)}")
+    for a in analyses:
+        if a.get("compare") == "classes" and a.get("condition") is not None \
+                and a["condition"] not in buckets:
+            raise click.ClickException(
+                f"analysis {a['name']!r}: condition {a['condition']!r} is not a bucket of "
+                f"group '{group}' (buckets: {buckets}).")
     if conditions:
         bad = sorted(set(conditions) - {c["name"] for c in comparison["_conditions"]})
         if bad:

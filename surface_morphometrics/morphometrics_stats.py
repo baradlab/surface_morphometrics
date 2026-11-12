@@ -390,6 +390,55 @@ def pairwise_tests(datasets, labels, include_ks=True, ns="ns", na="n/a", correct
     return rows
 
 
+def paired_tests(by_label, pairs, ns="ns", na="n/a", correction=None):
+    """Paired tests between classes measured in the same tomograms.
+
+    `by_label` is ``{label: {tomogram: summary_value}}`` (one per-tomogram summary per
+    class); `pairs` is a list of ``(label_a, label_b)``. Each pair is compared over the
+    tomograms that have BOTH classes, with a Wilcoxon signed-rank test (no normality
+    assumption) and a paired t-test on the per-tomogram differences. All-zero
+    differences give p = 1. `correction` adjusts across the pairs as in
+    :func:`pairwise_tests`.
+
+    Returns one dict per pair: class_a, class_b, n_pairs, mean_a, mean_b, mean_diff
+    (a - b), wilcoxon_W / _p / _stars, ttest_rel_t / _p / _stars.
+    """
+    rows = []
+    for la, lb in pairs:
+        common = sorted(set(by_label.get(la, {})) & set(by_label.get(lb, {})))
+        a = np.array([by_label[la][t] for t in common], dtype=float)
+        b = np.array([by_label[lb][t] for t in common], dtype=float)
+        d = a - b
+        w = p_w = t = p_t = np.nan
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            if len(d) >= 1 and np.all(d == 0):
+                w, p_w, t, p_t = 0.0, 1.0, np.nan, 1.0
+            elif len(d) >= 2:
+                try:
+                    w, p_w = stats.wilcoxon(a, b)
+                except ValueError:
+                    pass
+                try:
+                    t, p_t = stats.ttest_rel(a, b)
+                except (ValueError, ZeroDivisionError):
+                    pass
+        rows.append({
+            "class_a": la, "class_b": lb, "n_pairs": len(common),
+            "mean_a": float(a.mean()) if len(a) else np.nan,
+            "mean_b": float(b.mean()) if len(b) else np.nan,
+            "mean_diff": float(d.mean()) if len(d) else np.nan,
+            "wilcoxon_W": float(w), "wilcoxon_p": float(p_w),
+            "wilcoxon_stars": significance_stars(p_w, ns, na),
+            "ttest_rel_t": float(t), "ttest_rel_p": float(p_t),
+            "ttest_rel_stars": significance_stars(p_t, ns, na),
+        })
+    if correction is not None:
+        apply_correction(rows, correction, pcols=("wilcoxon_p", "ttest_rel_p"),
+                         ns=ns, na=na)
+    return rows
+
+
 def statistics(datasets, basename,  condition_names, morph_names, test_type="median", filename="test.csv", figsize=(5,4), ylabel="Peak Value", custom_colors=None, separator_after=None):
     """Generate mann-whitney U test and violin plots for a set of datasets.
 
